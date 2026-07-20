@@ -20,9 +20,9 @@ func TestNoopGateReturnsFullCompleteness(t *testing.T) {
 	}
 }
 
-func TestListSLOsEmptyForNow(t *testing.T) {
-	// M0 walking skeleton: the module returns no SLOs until SLI evaluation lands.
-	m := NewModule(nil, NewNoopGate())
+func TestListSLOsEmptyConfig(t *testing.T) {
+	// With no config file, ListSLOs returns an empty slice (server boots clean).
+	m := NewModule(nil, NewNoopGate(), NewFileConfigProvider(""))
 
 	reports, err := m.ListSLOs(context.Background(), valuer.GenerateUUID())
 	if err != nil {

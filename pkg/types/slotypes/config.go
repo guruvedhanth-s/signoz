@@ -37,6 +37,17 @@ type SLODefinition struct {
 	RequiresCompleteness bool `yaml:"requires_completeness" json:"requiresCompleteness,omitempty"`
 }
 
+// Normalize adjusts author-friendly values into the canonical form. Targets may
+// be written as a percentage (for example 99) or a fraction (0.99); any value
+// greater than 1 is divided by 100.
+func (c *Config) Normalize() {
+	for i := range c.SLOs {
+		if c.SLOs[i].Target > 1 {
+			c.SLOs[i].Target /= 100
+		}
+	}
+}
+
 // Validate checks that the definition has the fields its type requires.
 func (d SLODefinition) Validate() error {
 	if strings.TrimSpace(d.Name) == "" {

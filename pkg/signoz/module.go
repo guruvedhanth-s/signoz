@@ -167,7 +167,7 @@ func NewModules(
 		TraceDetail:         impltracedetail.NewModule(impltracedetail.NewTraceStore(telemetryStore), providerSettings, config.TraceDetail),
 		SpanMapper:          implspanmapper.NewModule(implspanmapper.NewStore(sqlstore), fl),
 		LLMPricingRule:      impllmpricingrule.NewModule(impllmpricingrule.NewStore(sqlstore), fl, querier),
-		SLO:                 implslo.NewModule(querier, implslo.NewNoopGate()),
+		SLO:                 implslo.NewModule(querier, implslo.NewNoopGate(), implslo.NewEnvFileConfigProvider()),
 		Tag:                 tagModule,
 	}
 }
