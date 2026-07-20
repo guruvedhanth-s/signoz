@@ -13,6 +13,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/SigNoz/signoz/pkg/types/dashboardtypes"
 	"github.com/SigNoz/signoz/pkg/types/slotypes"
 	"github.com/SigNoz/signoz/pkg/valuer"
 )
@@ -21,12 +22,19 @@ import (
 type Module interface {
 	// ListSLOs evaluates and returns every configured SLO for an organization.
 	ListSLOs(ctx context.Context, orgID valuer.UUID) ([]*slotypes.Report, error)
+
+	// GenerateDashboard creates, or idempotently updates, the SLO dashboard for an
+	// organization.
+	GenerateDashboard(ctx context.Context, orgID valuer.UUID, createdBy string, creator valuer.UUID) (*dashboardtypes.Dashboard, error)
 }
 
 // Handler exposes the SLO engine over HTTP.
 type Handler interface {
 	// List handles GET /api/v1/slo.
 	List(http.ResponseWriter, *http.Request)
+
+	// Generate handles POST /api/v1/slo/generate.
+	Generate(http.ResponseWriter, *http.Request)
 }
 
 // CompletenessGate is the single integration seam between the SLO engine

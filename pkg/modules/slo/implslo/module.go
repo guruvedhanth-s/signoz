@@ -6,8 +6,10 @@ import (
 
 	"github.com/SigNoz/signoz/pkg/errors"
 	"github.com/SigNoz/signoz/pkg/factory"
+	"github.com/SigNoz/signoz/pkg/modules/dashboard"
 	"github.com/SigNoz/signoz/pkg/modules/slo"
 	"github.com/SigNoz/signoz/pkg/querier"
+	"github.com/SigNoz/signoz/pkg/types/dashboardtypes"
 	"github.com/SigNoz/signoz/pkg/types/slotypes"
 	"github.com/SigNoz/signoz/pkg/valuer"
 )
@@ -17,6 +19,7 @@ type module struct {
 	gate          slo.CompletenessGate
 	config        ConfigProvider
 	emitter       *emitter
+	generator     *generator
 	gateThreshold float64
 	now           func() time.Time
 }
@@ -27,7 +30,7 @@ type module struct {
 // Health Auditor (pass NewNoopGate until Track A is available), config supplies
 // the SLO definitions, and settings provides the meter used to emit slo.*
 // metrics back into SigNoz.
-func NewModule(q querier.Querier, gate slo.CompletenessGate, config ConfigProvider, settings factory.ProviderSettings) slo.Module {
+func NewModule(q querier.Querier, gate slo.CompletenessGate, config ConfigProvider, dashboards dashboard.Module, settings factory.ProviderSettings) slo.Module {
 	scoped := factory.NewScopedProviderSettings(settings, "github.com/SigNoz/signoz/pkg/modules/slo")
 	emit, err := newEmitter(scoped.Meter())
 	if err != nil {
@@ -39,9 +42,15 @@ func NewModule(q querier.Querier, gate slo.CompletenessGate, config ConfigProvid
 		gate:          gate,
 		config:        config,
 		emitter:       emit,
+		generator:     newGenerator(dashboards),
 		gateThreshold: defaultGateThreshold,
 		now:           time.Now,
 	}
+}
+
+// GenerateDashboard creates or idempotently updates the SLO dashboard.
+func (m *module) GenerateDashboard(ctx context.Context, orgID valuer.UUID, createdBy string, creator valuer.UUID) (*dashboardtypes.Dashboard, error) {
+	return m.generator.Generate(ctx, orgID, createdBy, creator)
 }
 
 // ListSLOs evaluates every configured SLO for an organization.

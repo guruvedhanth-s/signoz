@@ -35,3 +35,26 @@ func (h *handler) List(rw http.ResponseWriter, r *http.Request) {
 
 	render.Success(rw, http.StatusOK, reports)
 }
+
+// Generate handles POST /api/v1/slo/generate and creates or updates the SLO
+// dashboard for the caller's organization.
+func (h *handler) Generate(rw http.ResponseWriter, r *http.Request) {
+	claims, err := authtypes.ClaimsFromContext(r.Context())
+	if err != nil {
+		render.Error(rw, err)
+		return
+	}
+
+	dash, err := h.module.GenerateDashboard(
+		r.Context(),
+		valuer.MustNewUUID(claims.OrgID),
+		claims.Email,
+		valuer.MustNewUUID(claims.IdentityID()),
+	)
+	if err != nil {
+		render.Error(rw, err)
+		return
+	}
+
+	render.Success(rw, http.StatusOK, dash)
+}

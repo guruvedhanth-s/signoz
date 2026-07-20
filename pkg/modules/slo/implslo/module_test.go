@@ -23,7 +23,7 @@ func TestNoopGateReturnsFullCompleteness(t *testing.T) {
 
 func TestListSLOsEmptyConfig(t *testing.T) {
 	// With no config file, ListSLOs returns an empty slice (server boots clean).
-	m := NewModule(nil, NewNoopGate(), NewFileConfigProvider(""), instrumentationtest.New().ToProviderSettings())
+	m := NewModule(nil, NewNoopGate(), NewFileConfigProvider(""), nil, instrumentationtest.New().ToProviderSettings())
 
 	reports, err := m.ListSLOs(context.Background(), valuer.GenerateUUID())
 	if err != nil {

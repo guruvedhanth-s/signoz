@@ -554,6 +554,7 @@ func (aH *APIHandler) RegisterRoutes(router *mux.Router, am *middleware.AuthZ) {
 
 	// SLO and Error-Budget Engine
 	router.HandleFunc("/api/v1/slo", am.ViewAccess(aH.Signoz.Handlers.SLO.List)).Methods(http.MethodGet)
+	router.HandleFunc("/api/v1/slo/generate", am.EditAccess(aH.Signoz.Handlers.SLO.Generate)).Methods(http.MethodPost)
 
 	router.HandleFunc("/api/v1/register", am.OpenAccess(aH.registerUser)).Methods(http.MethodPost)
 
