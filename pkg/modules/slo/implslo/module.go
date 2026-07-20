@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/SigNoz/signoz/pkg/errors"
+	"github.com/SigNoz/signoz/pkg/factory"
 	"github.com/SigNoz/signoz/pkg/modules/slo"
 	"github.com/SigNoz/signoz/pkg/querier"
 	"github.com/SigNoz/signoz/pkg/types/slotypes"
@@ -15,6 +16,7 @@ type module struct {
 	scalar        ScalarQuerier
 	gate          slo.CompletenessGate
 	config        ConfigProvider
+	emitter       *emitter
 	gateThreshold float64
 	now           func() time.Time
 }
@@ -22,13 +24,21 @@ type module struct {
 // NewModule constructs the SLO engine.
 //
 // q executes the SLI queries, gate is the completeness seam to the Telemetry
-// Health Auditor (pass NewNoopGate until Track A is available), and config
-// supplies the SLO definitions.
-func NewModule(q querier.Querier, gate slo.CompletenessGate, config ConfigProvider) slo.Module {
+// Health Auditor (pass NewNoopGate until Track A is available), config supplies
+// the SLO definitions, and settings provides the meter used to emit slo.*
+// metrics back into SigNoz.
+func NewModule(q querier.Querier, gate slo.CompletenessGate, config ConfigProvider, settings factory.ProviderSettings) slo.Module {
+	scoped := factory.NewScopedProviderSettings(settings, "github.com/SigNoz/signoz/pkg/modules/slo")
+	emit, err := newEmitter(scoped.Meter())
+	if err != nil {
+		scoped.Logger().Error("failed to create slo metric instruments, emission disabled", "error", err)
+		emit = nil
+	}
 	return &module{
 		scalar:        NewScalarQuerier(q),
 		gate:          gate,
 		config:        config,
+		emitter:       emit,
 		gateThreshold: defaultGateThreshold,
 		now:           time.Now,
 	}
@@ -50,9 +60,9 @@ func (m *module) ListSLOs(ctx context.Context, orgID valuer.UUID) ([]*slotypes.R
 	for _, def := range cfg.SLOs {
 		report, err := m.evaluate(ctx, orgID, cfg.Service, def, now)
 		if err != nil {
-			reports = append(reports, indeterminateReport(cfg.Service, def))
-			continue
+			report = indeterminateReport(cfg.Service, def)
 		}
+		m.emitter.Emit(ctx, report)
 		reports = append(reports, report)
 	}
 	return reports, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/SigNoz/signoz/pkg/instrumentation/instrumentationtest"
 	"github.com/SigNoz/signoz/pkg/types/slotypes"
 	"github.com/SigNoz/signoz/pkg/valuer"
 )
@@ -22,7 +23,7 @@ func TestNoopGateReturnsFullCompleteness(t *testing.T) {
 
 func TestListSLOsEmptyConfig(t *testing.T) {
 	// With no config file, ListSLOs returns an empty slice (server boots clean).
-	m := NewModule(nil, NewNoopGate(), NewFileConfigProvider(""))
+	m := NewModule(nil, NewNoopGate(), NewFileConfigProvider(""), instrumentationtest.New().ToProviderSettings())
 
 	reports, err := m.ListSLOs(context.Background(), valuer.GenerateUUID())
 	if err != nil {
