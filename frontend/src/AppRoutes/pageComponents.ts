@@ -329,3 +329,7 @@ export const LLMObservabilityPage = Loadable(
 			/* webpackChunkName: "LLM Observability Page" */ 'pages/LLMObservability'
 		),
 );
+
+export const SLOPage = Loadable(
+	() => import(/* webpackChunkName: "SLO Page" */ 'pages/SLO'),
+);

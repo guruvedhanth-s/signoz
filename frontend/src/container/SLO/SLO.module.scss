@@ -1,0 +1,27 @@
+.container {
+	padding: 16px 24px;
+}
+
+.header {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 16px;
+}
+
+.title {
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.subtitle {
+	font-size: 13px;
+	opacity: 0.7;
+}
+
+.state {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 240px;
+}

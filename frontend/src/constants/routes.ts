@@ -93,6 +93,7 @@ const ROUTES = {
 	LLM_OBSERVABILITY_BASE: '/llm-observability',
 	LLM_OBSERVABILITY_OVERVIEW: '/llm-observability/overview',
 	LLM_OBSERVABILITY_CONFIGURATION: '/llm-observability/configuration',
+	SLO: '/slo',
 } as const;
 
 export default ROUTES;

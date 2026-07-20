@@ -45,6 +45,7 @@ import {
 	ServiceTopLevelOperationsPage,
 	SettingsPage,
 	SignupPage,
+	SLOPage,
 	SomethingWentWrong,
 	StatusPage,
 	SupportPage,
@@ -532,6 +533,13 @@ const routes: AppRoutes[] = [
 		exact: true,
 		component: LLMObservabilityPage,
 		key: 'LLM_OBSERVABILITY_CONFIGURATION',
+		isPrivate: true,
+	},
+	{
+		path: ROUTES.SLO,
+		exact: true,
+		component: SLOPage,
+		key: 'SLO',
 		isPrivate: true,
 	},
 ];
