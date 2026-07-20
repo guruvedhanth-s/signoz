@@ -1,27 +1,28 @@
-import { Tag, TableColumnsType as ColumnsType, Tooltip } from 'antd';
+import { TableColumnsType as ColumnsType, Tooltip } from 'antd';
+import { Badge, BadgeColor } from '@signozhq/ui/badge';
 import { SLOReport, SLOState } from 'types/api/slo';
 
-const STATE_META: Record<SLOState, { color: string; label: string }> = {
-	healthy: { color: 'green', label: 'Healthy' },
-	unhealthy: { color: 'red', label: 'Unhealthy' },
-	indeterminate: { color: 'gold', label: 'Indeterminate' },
+const STATE_META: Record<SLOState, { color: BadgeColor; label: string }> = {
+	healthy: { color: 'success', label: 'Healthy' },
+	unhealthy: { color: 'error', label: 'Unhealthy' },
+	indeterminate: { color: 'warning', label: 'Indeterminate' },
 };
 
 export function StateBadge({ state }: { state: SLOState }): JSX.Element {
 	const meta = STATE_META[state];
-	const tag = (
-		<Tag color={meta.color} data-testid={`slo-state-${state}`}>
+	const badge = (
+		<Badge color={meta.color} variant="outline" testId={`slo-state-${state}`}>
 			{meta.label}
-		</Tag>
+		</Badge>
 	);
 	if (state === 'indeterminate') {
 		return (
 			<Tooltip title="Telemetry is incomplete, so this SLO cannot be trusted. Fix instrumentation to make it measurable.">
-				{tag}
+				<span>{badge}</span>
 			</Tooltip>
 		);
 	}
-	return tag;
+	return badge;
 }
 
 function formatPct(value: number): string {

@@ -1,4 +1,5 @@
-import { Empty, Spin, Table, Typography } from 'antd';
+import { Empty, Spin, Table } from 'antd';
+import { Typography } from '@signozhq/ui/typography';
 import { SLOReport } from 'types/api/slo';
 
 import styles from './SLO.module.scss';
@@ -28,13 +29,13 @@ function SLOContainer(): JSX.Element {
 	return (
 		<div className={styles.container} data-testid="slo-container">
 			<div className={styles.header}>
-				<Typography.Text className={styles.title}>
+				<Typography className={styles.title} weight="semibold" size="lg">
 					SLOs & Error Budgets
-				</Typography.Text>
-				<Typography.Text className={styles.subtitle}>
-					Reliability objectives evaluated from telemetry. An SLO reads
-					Indeterminate when the telemetry needed to compute it is incomplete.
-				</Typography.Text>
+				</Typography>
+				<Typography className={styles.subtitle} color="muted">
+					Reliability objectives evaluated from telemetry. An SLO reads Indeterminate
+					when the telemetry needed to compute it is incomplete.
+				</Typography>
 			</div>
 
 			{reports.length === 0 ? (
