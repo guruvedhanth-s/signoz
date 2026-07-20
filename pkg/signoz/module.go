@@ -42,6 +42,8 @@ import (
 	"github.com/SigNoz/signoz/pkg/modules/serviceaccount"
 	"github.com/SigNoz/signoz/pkg/modules/services"
 	"github.com/SigNoz/signoz/pkg/modules/services/implservices"
+	"github.com/SigNoz/signoz/pkg/modules/slo"
+	"github.com/SigNoz/signoz/pkg/modules/slo/implslo"
 	"github.com/SigNoz/signoz/pkg/modules/session"
 	"github.com/SigNoz/signoz/pkg/modules/session/implsession"
 	"github.com/SigNoz/signoz/pkg/modules/spanmapper"
@@ -85,6 +87,7 @@ type Modules struct {
 	SpanPercentile      spanpercentile.Module
 	MetricsExplorer     metricsexplorer.Module
 	MetricReductionRule metricreductionrule.Module
+	SLO                 slo.Module
 	InfraMonitoring     inframonitoring.Module
 	Promote              promote.Module
 	ServiceAccount       serviceaccount.Module
@@ -164,6 +167,7 @@ func NewModules(
 		TraceDetail:         impltracedetail.NewModule(impltracedetail.NewTraceStore(telemetryStore), providerSettings, config.TraceDetail),
 		SpanMapper:          implspanmapper.NewModule(implspanmapper.NewStore(sqlstore), fl),
 		LLMPricingRule:      impllmpricingrule.NewModule(impllmpricingrule.NewStore(sqlstore), fl, querier),
+		SLO:                 implslo.NewModule(querier, implslo.NewNoopGate()),
 		Tag:                 tagModule,
 	}
 }

@@ -40,6 +40,8 @@ import (
 	"github.com/SigNoz/signoz/pkg/modules/serviceaccount/implserviceaccount"
 	"github.com/SigNoz/signoz/pkg/modules/services"
 	"github.com/SigNoz/signoz/pkg/modules/services/implservices"
+	"github.com/SigNoz/signoz/pkg/modules/slo"
+	"github.com/SigNoz/signoz/pkg/modules/slo/implslo"
 	"github.com/SigNoz/signoz/pkg/modules/spanmapper"
 	"github.com/SigNoz/signoz/pkg/modules/spanmapper/implspanmapper"
 	"github.com/SigNoz/signoz/pkg/modules/spanpercentile"
@@ -67,6 +69,7 @@ type Handlers struct {
 	Services                services.Handler
 	MetricsExplorer         metricsexplorer.Handler
 	MetricReductionRule     metricreductionrule.Handler
+	SLO                     slo.Handler
 	InfraMonitoring         inframonitoring.Handler
 	Global                  global.Handler
 	FlaggerHandler          flagger.Handler
@@ -114,6 +117,7 @@ func NewHandlers(
 		Services:                implservices.NewHandler(modules.Services),
 		MetricsExplorer:         implmetricsexplorer.NewHandler(modules.MetricsExplorer),
 		MetricReductionRule:     implmetricreductionrule.NewHandler(modules.MetricReductionRule),
+		SLO:                     implslo.NewHandler(modules.SLO),
 		InfraMonitoring:         implinframonitoring.NewHandler(modules.InfraMonitoring),
 		SpanPercentile:          implspanpercentile.NewHandler(modules.SpanPercentile),
 		Global:                  signozglobal.NewHandler(global),
