@@ -12,7 +12,7 @@ slos:
     type: ratio
     target: 99
     window: 30d
-    good_query: agent_requests_total - agent_errors_total
+    good_query: agent_success_total
     total_query: agent_requests_total
     # Gate this SLO on the Telemetry Health Auditor: if telemetry is incomplete,
     # the result is reported as indeterminate instead of a false green.

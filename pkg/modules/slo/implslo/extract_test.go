@@ -61,3 +61,42 @@ func TestExtractScalar(t *testing.T) {
 		}
 	})
 }
+
+func TestExtractScalarFromTimeSeries(t *testing.T) {
+	// PromQL scalar queries return a TimeSeriesData: read the latest value.
+	resp := &qbtypes.QueryRangeResponse{
+		Data: qbtypes.QueryData{
+			Results: []any{
+				&qbtypes.TimeSeriesData{
+					QueryName: "__result_0",
+					Aggregations: []*qbtypes.AggregationBucket{
+						{
+							Series: []*qbtypes.TimeSeries{
+								{Values: []*qbtypes.TimeSeriesValue{
+									{Timestamp: 1, Value: 9000},
+									{Timestamp: 2, Value: 10000},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	got, err := extractScalar(resp)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 10000 {
+		t.Fatalf("got %v, want 10000 (latest value)", got)
+	}
+
+	t.Run("empty series errors", func(t *testing.T) {
+		empty := &qbtypes.QueryRangeResponse{Data: qbtypes.QueryData{Results: []any{
+			&qbtypes.TimeSeriesData{Aggregations: []*qbtypes.AggregationBucket{{Series: nil}}},
+		}}}
+		if _, err := extractScalar(empty); err == nil {
+			t.Fatal("expected error for empty series")
+		}
+	})
+}
