@@ -2,7 +2,6 @@ package slo
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -80,7 +79,7 @@ func (e *Engine) evaluate(ctx context.Context, service string, def SLODefinition
 		}
 	}
 
-	sli, err := e.evaluateSLI(ctx, def, startMs, endMs)
+	sli, err := evaluateSLI(ctx, e.scalar, def, startMs, endMs)
 	if err != nil {
 		return nil, err
 	}
@@ -95,15 +94,6 @@ func (e *Engine) evaluate(ctx context.Context, service string, def SLODefinition
 	}
 	report.ErrorBudgetRemaining = remaining
 	return report, nil
-}
-
-func (e *Engine) evaluateSLI(ctx context.Context, def SLODefinition, startMs, endMs uint64) (float64, error) {
-	switch def.Type {
-	case SLITypeRatio:
-		return evaluateRatio(ctx, e.scalar, def, startMs, endMs)
-	default:
-		return 0, fmt.Errorf("slo %q: SLI type %q is not implemented yet", def.Name, def.Type)
-	}
 }
 
 func indeterminateReport(service string, def SLODefinition) *Report {

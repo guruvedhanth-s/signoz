@@ -25,9 +25,14 @@ type SLODefinition struct {
 	// Target is a fraction in (0,1]. Authored as 99 or 0.99; normalized on load.
 	Target float64 `yaml:"target" json:"target"`
 	Window Window  `yaml:"window" json:"window"`
-	// Ratio inputs (single-vector PromQL expressions).
+	// Good/total inputs (single-vector PromQL expressions). Used by ratio,
+	// completeness, and grounded_answers types.
 	GoodQuery  string `yaml:"good_query" json:"goodQuery,omitempty"`
 	TotalQuery string `yaml:"total_query" json:"totalQuery,omitempty"`
+	// Latency-threshold inputs. LatencyMetric is a histogram metric name;
+	// ThresholdMs is the latency budget in milliseconds.
+	LatencyMetric string  `yaml:"latency_metric" json:"latencyMetric,omitempty"`
+	ThresholdMs   float64 `yaml:"threshold_ms" json:"thresholdMs,omitempty"`
 	// RequiresCompleteness gates the SLO on the telemetry auditor.
 	RequiresCompleteness bool `yaml:"requires_completeness" json:"requiresCompleteness,omitempty"`
 }
@@ -73,12 +78,14 @@ func (d SLODefinition) Validate() error {
 		return fmt.Errorf("slo %q: %w", d.Name, err)
 	}
 	switch d.Type {
-	case SLITypeRatio:
+	case SLITypeRatio, SLITypeCompleteness, SLITypeGroundedAnswers:
 		if strings.TrimSpace(d.GoodQuery) == "" || strings.TrimSpace(d.TotalQuery) == "" {
-			return fmt.Errorf("slo %q: ratio type requires good_query and total_query", d.Name)
+			return fmt.Errorf("slo %q: %s type requires good_query and total_query", d.Name, d.Type)
 		}
-	case SLITypeLatencyThreshold, SLITypeCompleteness, SLITypeGroundedAnswers:
-		// Validated by their own evaluators in later milestones.
+	case SLITypeLatencyThreshold:
+		if strings.TrimSpace(d.LatencyMetric) == "" || d.ThresholdMs <= 0 {
+			return fmt.Errorf("slo %q: latency_threshold type requires latency_metric and threshold_ms > 0", d.Name)
+		}
 	default:
 		return fmt.Errorf("slo %q: unknown type %q", d.Name, d.Type)
 	}

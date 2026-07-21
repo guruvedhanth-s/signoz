@@ -63,6 +63,4 @@ internal/signoz/     HTTP client for stock SigNoz (query_range; SIGNOZ-API-KEY a
 
 ## Roadmap
 
-- More SLI types (latency threshold, completeness, grounded answers).
-- More SLI types (latency threshold, completeness, grounded answers).
-- Telemetry Health Auditor (Track A) + the real completeness gate.
+- Telemetry Health Auditor (Track A) + the real completeness gate (replaces NoopGate).
