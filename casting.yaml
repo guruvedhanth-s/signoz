@@ -6,8 +6,8 @@ spec:
   deployment:
     flavor: compose
     mode: docker
-  # The MCP server is optional for this project (Track B uses the REST API).
-  # To enable it, set enabled: true (needs host port 8000 free) and re-cast.
+  # The SigNoz MCP server, deployed alongside the stack (needs host port 8000).
+  # The reliability agent uses it as a first-class read path in addition to REST.
   mcp:
     spec:
-      enabled: false
+      enabled: true

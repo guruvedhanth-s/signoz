@@ -301,13 +301,21 @@ spec:
       cluster:
         replicas: 1
       config: {}
-      enabled: false
+      enabled: true
+      env:
+        MCP_SERVER_PORT: "8000"
+        SIGNOZ_URL: http://signoz-signoz-0:8080
+        TRANSPORT_MODE: http
       image: signoz/signoz-mcp-server:latest
       version: latest
     status:
       addresses:
         http: null
       config: {}
+      env:
+        MCP_SERVER_PORT: "8000"
+        SIGNOZ_URL: http://signoz-signoz-0:8080
+        TRANSPORT_MODE: http
   metastore:
     kind: postgres
     spec:
