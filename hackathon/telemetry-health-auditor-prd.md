@@ -351,23 +351,49 @@ unhealthy     = telemetry trusted AND SLI <  target
 indeterminate = telemetry not trusted or SLI evidence incomplete
 ```
 
-Multi-window burn rate follows the Google SRE ladder (fast 1h+5m at 14.4x page; medium 6h+30m at 6x; slow 24h+2h at 3x), implemented by emitting per-window burn metrics and alerting on a threshold that requires both windows to exceed it.
+Multi-window burn rate follows the Google SRE ladder (fast 1h+5m at 14.4x page; medium 6h+30m at 6x; slow 24h+2h at 3x).
+Implementation note: a PromQL `and` between two burn-rate series labelled `window="1h"` and `window="5m"` never matches, because the differing `window` label breaks vector matching.
+So the agent precomputes the AND itself: it evaluates both windows and emits a single derived gauge `slo_mwmb_firing{slo,tier}` set to 1 when both the long and short window exceed the tier threshold, and the SigNoz alert is a trivial `slo_mwmb_firing > 0` threshold.
+This sidesteps both the vector-matching problem and the upstream formula-alert bugs. (The pure-PromQL alternative is `... and ignoring(window) ...`.)
 
-### 11.4 Completeness gate (the seam to grounding)
+Target edge cases: a 100% target has zero error budget, so any error yields infinite burn and immediate `unhealthy`; a target of exactly 0 or above 1 is a config error and is rejected on load.
+Demo windows: production SLOs use long windows (30d), but the demo uses a short SLO window (for example 1h, or shorter) so the SLI, budget, and burn all move visibly within the session; recovery is shown on the short-window burn rate, not on a long compliance window.
+
+### 11.4 Two gates: SLO completeness and RCA evidence
+
+There are two distinct trust gates, because the SLO and the RCA need different evidence.
+
+The SLO completeness gate checks that the metrics an SLO reads are present:
 
 ```go
 type CompletenessGate interface {
     Check(ctx context.Context, service, environment string, window time.Duration) (GateResult, error)
 }
 type GateResult struct {
-    Coverage      float64 // 0..1 fraction of required evidence present
+    Coverage      float64 // 0..1 fraction of required SLO metrics present
     QueryComplete bool
-    Trusted       bool
+    Trusted       bool    // Coverage >= threshold AND QueryComplete
     Reason        string
 }
 ```
 
-The RCA agent calls the same gate: if `Trusted` is false, the diagnosis is `indeterminate` and the agent explains what evidence is missing instead of guessing.
+The RCA evidence gate is separate. Passing the SLO gate does not mean the telemetry needed to explain a failure exists; the metrics can be complete while the traces, error spans, exceptions, or correlated logs are absent.
+
+```go
+type EvidenceGate interface {
+    Check(ctx context.Context, service, environment string, window time.Duration) (EvidenceResult, error)
+}
+type EvidenceResult struct {
+    HasErrorSpans  bool
+    HasExceptions  bool
+    HasLogs        bool
+    Sufficient     bool   // enough signal to attempt a root cause
+    Reason         string
+}
+```
+
+The SLO engine uses the completeness gate to decide `indeterminate` vs a computed SLO.
+The RCA agent uses the evidence gate: if `Sufficient` is false it returns an `indeterminate` diagnosis that names what is missing ("the SLO broke but there are no error spans or exception logs for this service and window") instead of guessing.
 
 ---
 
@@ -375,13 +401,19 @@ The RCA agent calls the same gate: if `Trusted` is false, the diagnosis is `inde
 
 The MVP is alert-driven.
 The sidekick runs in `watch` mode and exposes an HTTP webhook receiver.
-A SigNoz notification channel of type webhook points at that receiver, so when one of our generated alerts fires (SLO burn-rate high, telemetry-quality dropped, or SLO turned indeterminate) SigNoz posts to the sidekick and the loop starts autonomously.
+A SigNoz notification channel of type webhook points at that receiver, so when one of our generated alerts fires (burn-rate high, telemetry-quality dropped, or SLO turned indeterminate) SigNoz posts to the sidekick and the loop starts autonomously.
+
+Reachability without touching SigNoz.
+The sidekick container joins the existing Foundry compose network with a runtime `docker network connect <foundry-network> sre-sidekick`.
+This is a command on our container; it does not modify the SigNoz source or the Foundry-generated `pours/` or compose files.
+SigNoz's alertmanager can then reach the receiver at `http://sre-sidekick:<port>/webhook`, and the notification channel URL uses that in-network name.
+(Alternative, also no SigNoz change: run the sidekick on the host and point the channel at `http://host.docker.internal:<port>/webhook`.)
 
 Mechanics:
 
-- The sidekick and SigNoz run on the same Foundry compose network, so the receiver is reachable at a stable in-network address.
-- The bootstrap step registers the webhook channel and attaches it to the generated alerts.
-- The webhook payload is parsed into `(service, environment, window, alert)`; labels on our alerts (`service`, `slo`, `severity`) carry the scope, so no LLM is needed to route the incident.
+- Bootstrap registers the webhook channel (with a shared-secret header) and attaches it to the generated alerts.
+- The receiver verifies the shared secret and deduplicates by an incident fingerprint (`service` + `environment` + `slo` + alert state), so repeated alert deliveries do not launch duplicate paid RCA runs or spam Slack.
+- The webhook payload is parsed into `(service, environment, window, alert)` from the alert labels; no LLM is needed to route the incident.
 
 A human `ask` path (a Slack slash command) is supported behind the same entry point but is not the MVP demo trigger.
 Detection is deterministic; no LLM decides that an incident exists.
@@ -397,7 +429,7 @@ Detection is deterministic; no LLM decides that an incident exists.
 
 ### 13.2 Behavior
 
-1. If the gate says the telemetry is not trusted, return an `indeterminate` diagnosis that names the missing or incomplete evidence. Do not proceed to reasoning.
+1. Check the RCA evidence gate (section 11.4). If the RCA evidence is insufficient (no error spans, exceptions, or correlated logs for the service and window), return an `indeterminate` diagnosis that names what is missing. Do not proceed to reasoning. This is separate from the SLO completeness gate; complete SLO metrics do not imply the traces needed to explain a failure exist.
 2. Otherwise, gather bounded evidence via MCP tools: error spans, top exceptions, latency distribution shift, correlated logs, recent deploys or version changes.
 3. The RCA agent is a Google ADK Go agent. ADK orchestrates the reasoning loop and calls the SigNoz MCP tools natively; the DeepSeek model (via an OpenAI-compatible OpenRouter client) produces the root cause and a recommended advisory action.
 4. The model only reasons over the retrieved evidence; it must cite the evidence it used and must not invent metrics or services.
@@ -405,30 +437,44 @@ Detection is deterministic; no LLM decides that an incident exists.
 
 ### 13.3 Diagnosis contract
 
+The model authors only free text; every deterministic field is injected by the renderer, never by the model.
+
+The model returns exactly this small shape:
+
 ```json
 {
-  "service": "support-agent",
-  "window": "1h",
-  "status": "diagnosed",            // diagnosed | indeterminate
-  "grounding": {
-    "slo": "successful-agent-runs",
-    "slo_state": "unhealthy",
-    "burn_rate": 20.0,
-    "error_budget_remaining": -19.0,
-    "telemetry_trusted": true
-  },
-  "root_cause": "Error rate rose after the 12:40 deploy; 78% of failures are TimeoutError from tool.search_knowledge_base.",
-  "confidence": 0.72,
-  "evidence": [
-    {"kind": "trace", "signoz_link": "https://<host>/trace/...", "note": "timeout span"},
-    {"kind": "logs",  "signoz_link": "https://<host>/logs?...", "note": "connection reset spike"}
+  "root_cause": "78% of failures are TimeoutError from tool.search_knowledge_base after the recent change.",
+  "candidates": [
+    {"hypothesis": "tool timeout too low", "evidence_ids": ["e1", "e2"]},
+    {"hypothesis": "downstream KB service saturation", "evidence_ids": ["e3"]}
   ],
-  "proposed_fix": "Roll back support-agent to the previous revision, or raise the tool timeout to 5s.",
-  "reversible": true
+  "proposed_fix": "Raise the tool timeout, or roll back the recent change."
 }
 ```
 
-When `status` is `indeterminate`, `root_cause` and `proposed_fix` are omitted and a `missing_evidence` list is included instead.
+The renderer then assembles the full diagnosis, injecting the deterministic parts:
+
+```json
+{
+  "service": "support-agent",
+  "environment": "local",
+  "window": "1h",
+  "status": "diagnosed",            // diagnosed | indeterminate
+  "grounding": { "slo": "successful-agent-runs", "slo_state": "unhealthy", "burn_rate": 20.0, "error_budget_remaining": -19.0, "telemetry_trusted": true },
+  "root_cause": "<model text>",
+  "candidates": [ "<model, each citing evidence_ids that must exist>" ],
+  "evidence": [ {"id": "e1", "kind": "trace", "signoz_link": "<from MCP webUrl, not the model>"} ],
+  "proposed_fix": "<model text>",
+  "reversible": false               // set by a rule/allowlist, never by the model
+}
+```
+
+Rules the renderer enforces:
+
+- `grounding`, `evidence` links, `reversible`, and all numbers come from deterministic sources (the SLO engine and the MCP `webUrl` values); the model cannot set or alter them.
+- Every `evidence_ids` the model cites must resolve to a retrieved evidence item, or that claim is dropped.
+- `reversible` is decided by an action allowlist, not the model; unknown or destructive fixes default to not reversible.
+- When the evidence gate says insufficient, `status` is `indeterminate`, `root_cause` and `proposed_fix` are omitted, and a `missing_evidence` list is included.
 
 ### 13.4 Presentation rules (rule-based, not soft confidence)
 
@@ -492,6 +538,7 @@ When an executing adapter is added, it receives the approved proposal and return
 ## 16. Verify stage
 
 After an action, the sidekick re-runs the deterministic audit and SLO evaluation for the service and window and reports whether the score, SLO state, and burn rate are recovering.
+Recovery is measured on the short-window burn rate, which responds within minutes, not on a long compliance window that stays depressed after budget-consuming failures.
 Verification is deterministic and is the honest close of the loop: the agent does not claim success; it measures it.
 
 ---
@@ -505,12 +552,15 @@ Metrics (OTLP, underscore names so they are PromQL-queryable):
 | `telemetry_quality_score` | `service` |
 | `telemetry_quality_findings` | `service`, `severity` |
 | `telemetry_quality_coverage` | `service` |
-| `slo_compliance` | `service`, `slo`, `window` |
-| `slo_state` | `service`, `slo` |
-| `slo_error_budget_remaining` | `service`, `slo` |
-| `slo_burn_rate` | `service`, `slo`, `window` |
-| `sidekick_incidents` | `service`, `status` |
-| `sidekick_actions` | `service`, `action`, `outcome` |
+| `slo_compliance` | `service`, `environment`, `slo`, `window` |
+| `slo_state` | `service`, `environment`, `slo` |
+| `slo_error_budget_remaining` | `service`, `environment`, `slo` |
+| `slo_burn_rate` | `service`, `environment`, `slo`, `window` |
+| `slo_mwmb_firing` | `service`, `environment`, `slo`, `tier` |
+| `sidekick_incidents` | `service`, `environment`, `status` |
+| `sidekick_actions` | `service`, `environment`, `action`, `outcome` |
+
+Every metric carries `environment` as well as `service`, so two environments that share a service name never aggregate together. Alert rules carry the same labels.
 
 Dashboards and alerts are generated idempotently through the public API.
 Dashboard API version is chosen by what renders on the stock deployment; the deployment is never modified to enable a version.
@@ -558,7 +608,9 @@ Modes:
 - `casting.yaml` installs stock SigNoz + collector + the MCP server (`mcp.spec.enabled: true`). No custom image.
 - `casting.yaml.lock` is committed. Judges reproduce with `foundryctl cast -f casting.yaml`.
 - The sidekick ships its own `Dockerfile` and points at the Foundry-installed SigNoz via `SIGNOZ_URL` and `SIGNOZ_API_KEY`.
-- A bootstrap script creates the service account, admin role, API key, and a webhook notification channel that points at the sidekick's `watch` receiver.
+- The sidekick container joins the Foundry network with `docker network connect` (a command on our container; the SigNoz deployment is not modified).
+- A bootstrap script creates the service account, admin role, API key, and a webhook notification channel (with a shared secret) that points at the sidekick's `watch` receiver.
+- On startup the sidekick runs a preflight that checks SigNoz reachability, the MCP server, the OpenRouter key, the Slack token, and that the demo-agent is emitting telemetry, and prints a clear warning for anything missing. There is no fallback path by design; a missing dependency is surfaced loudly rather than silently degraded.
 
 Repo shape:
 
@@ -578,8 +630,9 @@ hackathon/DEMO.md             runbook
 
 - No autonomous destructive action; every action requires explicit human approval.
 - The LLM never receives write credentials; actions run through typed adapters with scoped permissions.
-- Evidence sent to the LLM is bounded and redacted of secrets and sensitive fields.
+- Evidence sent to the LLM is bounded, redacted of secrets, field-allowlisted, size-limited, and clearly delimited as untrusted data, because logs and span attributes are attacker-controllable; this defends against prompt injection through telemetry.
 - Every diagnosis, message, approval, and action is logged with a correlation id for audit.
+- The webhook receiver requires a shared secret and deduplicates incidents, so it cannot be used to trigger unbounded paid RCA runs.
 - The deterministic engine never imports the LLM interface, so scoring cannot be influenced by a model.
 - The service account uses the least role that works; admin is used only where channel and rule creation require it.
 
@@ -604,6 +657,9 @@ hackathon/DEMO.md             runbook
 5. The Slack interface is a full Slack app (bot token, Block Kit, `/diagnose` slash command), not a bare webhook (section 14).
 6. The rule-based presentation is grounded in standard observability frameworks (Four Golden Signals, RED, USE) rather than ad-hoc heuristics (section 13.4).
 7. The trigger is alert-driven: a failure raises a SigNoz alert, the sidekick runs one autonomous pass, and posts to Slack.
+7a. Demo windows are short (for example 1h SLO with a 5m short window) so the SLI, burn rate, and recovery move within the session; production would use 30d.
+7b. External dependencies (OpenRouter, Slack, demo-agent) have no fallback by design. A startup preflight checks each and warns loudly if one is missing.
+7c. Build order: land the thin end-to-end path first (alert -> ground -> evidence-gate -> one MCP evidence query -> DeepSeek -> one Slack post), then add breadth (more presentation rules, the slash command, richer Block Kit). This protects the demo if time runs short.
 8. The agentic layer (Track C, RCA) is built with Google ADK Go (`google.golang.org/adk/v2`, ADK 2.0). ADK is code-first Go, so the full-Go constraint holds. ADK consumes the SigNoz MCP server as native tools for evidence gathering, and the DeepSeek model is provided to ADK through an OpenAI-compatible OpenRouter client. The deterministic engine does not import ADK.
 
 Everything below reflects these decisions.
@@ -622,20 +678,27 @@ Everything below reflects these decisions.
 
 ## 23. Demo script (7 minutes)
 
+The demo SLO uses a short window (for example 1h with a 5m short window) so the SLI, burn rate, and recovery all move within the session; a 30d window would not visibly change in seven minutes.
+The honesty beat and the incident use two different SLOs (or run in sequence with the metric restored between them) so the indeterminate step never blocks the incident step.
+A preflight runs first and warns loudly if any dependency is missing (there is no fallback).
+
 ```text
+0. Preflight: SigNoz, MCP, OpenRouter key, Slack token, demo-agent telemetry all green.
 1. foundryctl cast -f casting.yaml    -> stock SigNoz + MCP.
-2. Bootstrap. Run demo-agent (healthy). Show the SLO healthy and the generated dashboard.
-3a. Honesty beat: drop a required metric -> SLO indeterminate -> the sidekick posts
-    to Slack "telemetry incomplete, cannot diagnose reliably" instead of guessing.
-3b. Real incident: switch demo-agent to --buggy (a tool call now times out and raises).
-4. Errors spike -> our burn-rate alert fires -> SigNoz webhooks the sidekick.
-5. The sidekick grounds on the SLO (unhealthy, burn 20x), pulls the failing trace tree
-   and exception logs via MCP, runs DeepSeek RCA, and posts a Slack message:
-   root cause (tool.search_kb timeout after the buggy change), evidence links,
-   and a recommended advisory action. Then it stops for human review.
-6. The human applies the fix (revert demo-agent to healthy) and re-runs the check;
-   the SLO recovers.
-7. Pitch: an AI SRE agent that keeps AI-era systems reliable, grounded on SigNoz,
+2. Bootstrap. Run demo-agent (healthy). Show the SLO healthy (short window) and the dashboard.
+3. Honesty beat (its own SLO): drop that SLO's required metric -> it goes indeterminate ->
+   the sidekick posts to Slack "telemetry incomplete, cannot diagnose" instead of guessing.
+4. Real incident: switch demo-agent to --buggy (a tool call now times out and raises).
+5. Error rate rises -> the short-window burn-rate alert fires -> SigNoz webhooks the sidekick.
+6. The sidekick grounds on the SLO (unhealthy, burn well above 14.4x), passes the RCA
+   evidence gate, pulls the failing trace tree and exception logs via MCP, runs the
+   DeepSeek ADK agent, and posts a Slack message: root cause (tool.search_kb timeout
+   after the buggy change) with SigNoz evidence links and a recommended advisory action.
+   Then it stops for human review.
+7. The human reverts demo-agent to healthy. The short-window burn rate falls within
+   a couple of minutes and the alert clears; the sidekick reports recovery on the burn
+   rate (not on a long compliance window).
+8. Pitch: an AI SRE agent that keeps AI-era systems reliable, grounded on SigNoz,
    that refuses to guess when the telemetry cannot be trusted.
 ```
 
