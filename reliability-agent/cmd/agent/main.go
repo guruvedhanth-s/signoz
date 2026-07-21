@@ -9,6 +9,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/guruvedhanth-s/signoz/reliability-agent/internal/otlp"
 	"github.com/guruvedhanth-s/signoz/reliability-agent/internal/signoz"
 	"github.com/guruvedhanth-s/signoz/reliability-agent/internal/slo"
 )
@@ -40,9 +41,11 @@ Usage:
   agent slo   --config slo.yaml --signoz-url URL --api-key KEY
 
 Flags for 'slo':
-  --config       path to the SLO-as-code YAML (default: slo.yaml)
-  --signoz-url   SigNoz base URL (default: env SIGNOZ_URL or http://localhost:8080)
-  --api-key      service-account API key (default: env SIGNOZ_API_KEY)`)
+  --config         path to the SLO-as-code YAML (default: slo.yaml)
+  --signoz-url     SigNoz base URL (default: env SIGNOZ_URL or http://localhost:8080)
+  --api-key        service-account API key (default: env SIGNOZ_API_KEY)
+  --emit           emit slo.* metrics back into SigNoz over OTLP
+  --otlp-endpoint  collector OTLP HTTP endpoint (default: env OTLP_ENDPOINT or localhost:4318)`)
 }
 
 func runSLO(args []string) error {
@@ -50,6 +53,8 @@ func runSLO(args []string) error {
 	configPath := fs.String("config", "slo.yaml", "path to the SLO-as-code YAML")
 	url := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "service-account API key")
+	emit := fs.Bool("emit", false, "emit slo.* metrics back into SigNoz over OTLP")
+	otlpEndpoint := fs.String("otlp-endpoint", envOr("OTLP_ENDPOINT", "localhost:4318"), "collector OTLP HTTP endpoint")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -59,12 +64,31 @@ func runSLO(args []string) error {
 		return err
 	}
 
+	ctx := context.Background()
 	client := signoz.NewClient(*url, *apiKey)
 	engine := slo.NewEngine(client, slo.NoopGate{})
-	reports := engine.Evaluate(context.Background(), cfg)
+	reports := engine.Evaluate(ctx, cfg)
 
 	printReports(cfg.Service, reports)
+
+	if *emit {
+		if err := emitReports(ctx, *otlpEndpoint, reports); err != nil {
+			return err
+		}
+		fmt.Printf("\nemitted slo.* metrics to %s\n", *otlpEndpoint)
+	}
 	return nil
+}
+
+func emitReports(ctx context.Context, endpoint string, reports []*slo.Report) error {
+	emitter, err := otlp.NewEmitter(ctx, endpoint)
+	if err != nil {
+		return err
+	}
+	for _, r := range reports {
+		emitter.Emit(ctx, r)
+	}
+	return emitter.Shutdown(ctx)
 }
 
 func printReports(service string, reports []*slo.Report) {
