@@ -25,6 +25,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "generate":
+		if err := runGenerate(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -38,7 +43,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `reliability-agent - SLO and telemetry reliability for stock SigNoz
 
 Usage:
-  agent slo   --config slo.yaml --signoz-url URL --api-key KEY
+  agent slo        --config slo.yaml --signoz-url URL --api-key KEY [--emit]
+  agent generate   --signoz-url URL --api-key KEY
+
+'generate' creates (or idempotently updates) the SLO dashboard in SigNoz.
 
 Flags for 'slo':
   --config         path to the SLO-as-code YAML (default: slo.yaml)
@@ -106,6 +114,29 @@ func printReports(service string, reports []*slo.Report) {
 			r.Name, r.State, sli, r.Target*100, budget, burn)
 	}
 	w.Flush()
+}
+
+func runGenerate(args []string) error {
+	fs := flag.NewFlagSet("generate", flag.ExitOnError)
+	url := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
+	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "service-account API key")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	client := signoz.NewClient(*url, *apiKey)
+	data := slo.BuildDashboard()
+	id, created, err := client.GenerateDashboard(context.Background(), data)
+	if err != nil {
+		return err
+	}
+	verb := "updated"
+	if created {
+		verb = "created"
+	}
+	fmt.Printf("%s SLO dashboard %q (id %s)\n", verb, slo.DashboardTitle, id)
+	fmt.Printf("open: %s/dashboard/%s\n", *url, id)
+	return nil
 }
 
 func envOr(key, fallback string) string {

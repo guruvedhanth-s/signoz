@@ -33,12 +33,17 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
-func (c *Client) post(ctx context.Context, path string, body any, out any) error {
+func (c *Client) post(ctx context.Context, path string, body, out any) error {
+	return c.send(ctx, http.MethodPost, path, body, out)
+}
+
+// send issues an authenticated request with a JSON body and decodes the response.
+func (c *Client) send(ctx context.Context, method, path string, body, out any) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(buf))
 	if err != nil {
 		return err
 	}
@@ -46,16 +51,20 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	if c.apiKey != "" {
 		req.Header.Set("SIGNOZ-API-KEY", c.apiKey)
 	}
+	return c.do(req, path, out)
+}
 
+// do executes a prepared request and decodes a successful JSON response.
+func (c *Client) do(req *http.Request, path string, out any) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("POST %s: %w", path, err)
+		return fmt.Errorf("%s %s: %w", req.Method, path, err)
 	}
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("POST %s: status %d: %s", path, resp.StatusCode, truncate(data, 300))
+		return fmt.Errorf("%s %s: status %d: %s", req.Method, path, resp.StatusCode, truncate(data, 300))
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {

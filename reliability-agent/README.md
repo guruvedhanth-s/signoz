@@ -5,12 +5,14 @@ It evaluates SLOs (and, later, audits telemetry quality) by talking to SigNoz ov
 
 This is an independent Go module: it does not import any SigNoz package.
 
-## What it does today (Track B, milestone 1)
+## What it does today (Track B)
 
 - Reads SLO definitions as code (`slo.yaml`).
 - Computes the ratio SLI, error budget, and burn rate by querying stock SigNoz at `POST /api/v5/query_range`.
 - Applies the trust-aware state machine: `healthy` / `unhealthy` / `indeterminate`.
 - Prints a report.
+- `--emit`: writes `slo_*` metrics back into SigNoz over OTLP.
+- `generate`: creates (or idempotently updates) an SLO dashboard in SigNoz.
 
 ## Auth
 
@@ -24,7 +26,10 @@ go build -o agent ./cmd/agent
 
 SIGNOZ_URL=http://localhost:8080 \
 SIGNOZ_API_KEY=<service-account-api-key> \
-./agent slo --config slo.yaml
+./agent slo --config slo.yaml --emit
+
+# create/update the SLO dashboard inside SigNoz:
+./agent generate
 ```
 
 Example output:
@@ -58,6 +63,6 @@ internal/signoz/     HTTP client for stock SigNoz (query_range; SIGNOZ-API-KEY a
 
 ## Roadmap
 
-- OTLP emit of `slo.*` metrics back into SigNoz.
+- Generated burn-rate alerts via `POST /api/v2/rules`.
+- More SLI types (latency threshold, completeness, grounded answers).
 - Telemetry Health Auditor (Track A) + the real completeness gate.
-- Generated SLO dashboards and burn-rate alerts via the SigNoz API / MCP.
