@@ -74,7 +74,7 @@ func runSLO(args []string) error {
 
 	ctx := context.Background()
 	client := signoz.NewClient(*url, *apiKey)
-	engine := slo.NewEngine(client, slo.NoopGate{})
+	engine := slo.NewEngine(client, buildGate(client, cfg))
 	reports := engine.Evaluate(ctx, cfg)
 
 	printReports(cfg.Service, reports)
@@ -86,6 +86,15 @@ func runSLO(args []string) error {
 		fmt.Printf("\nemitted slo.* metrics to %s\n", *otlpEndpoint)
 	}
 	return nil
+}
+
+// buildGate uses a real metric-presence gate when the config lists expected
+// metrics, otherwise trusts telemetry (NoopGate).
+func buildGate(client *signoz.Client, cfg *slo.Config) slo.CompletenessGate {
+	if cfg.Completeness != nil && len(cfg.Completeness.ExpectedMetrics) > 0 {
+		return slo.NewMetricPresenceGate(client, cfg.Completeness.ExpectedMetrics)
+	}
+	return slo.NoopGate{}
 }
 
 func emitReports(ctx context.Context, endpoint string, reports []*slo.Report) error {

@@ -3,6 +3,14 @@
 service: support-agent
 environment: local
 
+# Telemetry-completeness gate: SLOs with requires_completeness are trusted only
+# when these metrics have data. Add a metric your app does not emit yet to see a
+# healthy-looking SLO correctly reported as "indeterminate".
+completeness:
+  expected_metrics:
+    - agent_requests_total
+    - agent_success_total
+
 slos:
   - name: successful-agent-runs
     description: Agent runs should complete without an error.

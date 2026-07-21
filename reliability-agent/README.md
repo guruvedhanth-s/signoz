@@ -10,6 +10,7 @@ This is an independent Go module: it does not import any SigNoz package.
 - Reads SLO definitions as code (`slo.yaml`).
 - Computes the ratio SLI, error budget, and burn rate by querying stock SigNoz at `POST /api/v5/query_range`.
 - Applies the trust-aware state machine: `healthy` / `unhealthy` / `indeterminate`.
+- Real completeness gate: an SLO is `indeterminate` when its service's expected metrics are missing (`completeness.expected_metrics`), not just when there is no data.
 - Prints a report.
 - `--emit`: writes `slo_*` metrics back into SigNoz over OTLP.
 - `generate`: creates (or idempotently updates) an SLO dashboard in SigNoz.
@@ -63,4 +64,4 @@ internal/signoz/     HTTP client for stock SigNoz (query_range; SIGNOZ-API-KEY a
 
 ## Roadmap
 
-- Telemetry Health Auditor (Track A) + the real completeness gate (replaces NoopGate).
+- Full Telemetry Health Auditor (Track A): more completeness checks (attributes, trace trees) feeding the gate.

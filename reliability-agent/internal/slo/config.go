@@ -12,9 +12,16 @@ import (
 
 // Config is the root of an SLO-as-code document.
 type Config struct {
-	Service     string          `yaml:"service" json:"service"`
-	Environment string          `yaml:"environment" json:"environment"`
-	SLOs        []SLODefinition `yaml:"slos" json:"slos"`
+	Service      string              `yaml:"service" json:"service"`
+	Environment  string              `yaml:"environment" json:"environment"`
+	SLOs         []SLODefinition     `yaml:"slos" json:"slos"`
+	Completeness *CompletenessConfig `yaml:"completeness" json:"completeness,omitempty"`
+}
+
+// CompletenessConfig drives the telemetry-completeness gate. A service's SLOs
+// with requires_completeness are trusted only when these metrics have data.
+type CompletenessConfig struct {
+	ExpectedMetrics []string `yaml:"expected_metrics" json:"expectedMetrics,omitempty"`
 }
 
 // SLODefinition is a single service-level objective declared as code.
