@@ -118,15 +118,23 @@ func printReports(service string, reports []*slo.Report) {
 
 func runGenerate(args []string) error {
 	fs := flag.NewFlagSet("generate", flag.ExitOnError)
+	configPath := fs.String("config", "slo.yaml", "path to the SLO-as-code YAML")
 	url := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "service-account API key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	cfg, err := slo.LoadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
 	client := signoz.NewClient(*url, *apiKey)
-	data := slo.BuildDashboard()
-	id, created, err := client.GenerateDashboard(context.Background(), data)
+
+	// 1. Dashboard.
+	id, created, err := client.GenerateDashboard(ctx, slo.BuildDashboard())
 	if err != nil {
 		return err
 	}
@@ -134,8 +142,27 @@ func runGenerate(args []string) error {
 	if created {
 		verb = "created"
 	}
-	fmt.Printf("%s SLO dashboard %q (id %s)\n", verb, slo.DashboardTitle, id)
-	fmt.Printf("open: %s/dashboard/%s\n", *url, id)
+	fmt.Printf("%s SLO dashboard %q\n  open: %s/dashboard/%s\n", verb, slo.DashboardTitle, *url, id)
+
+	// 2. Notification channel (burn-rate alerts require one).
+	if err := client.EnsureChannel(ctx, slo.DefaultChannelName); err != nil {
+		return err
+	}
+
+	// 3. A fast-burn alert per SLO (fires when slo_burn_rate exceeds the fast tier).
+	fastThreshold := slo.DefaultBurnRateTiers[0].Threshold
+	for _, def := range cfg.SLOs {
+		rule := slo.BuildBurnRateRule(def.Name, fastThreshold, slo.DefaultChannelName)
+		made, err := client.GenerateBurnRateAlert(ctx, slo.BurnRuleName(def.Name), rule)
+		if err != nil {
+			return err
+		}
+		status := "exists"
+		if made {
+			status = "created"
+		}
+		fmt.Printf("burn-rate alert %q: %s\n", slo.BurnRuleName(def.Name), status)
+	}
 	return nil
 }
 

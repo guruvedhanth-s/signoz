@@ -63,6 +63,6 @@ internal/signoz/     HTTP client for stock SigNoz (query_range; SIGNOZ-API-KEY a
 
 ## Roadmap
 
-- Generated burn-rate alerts via `POST /api/v2/rules`.
+- More SLI types (latency threshold, completeness, grounded answers).
 - More SLI types (latency threshold, completeness, grounded answers).
 - Telemetry Health Auditor (Track A) + the real completeness gate.
