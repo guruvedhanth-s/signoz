@@ -1,0 +1,13 @@
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: signoz
+spec:
+  deployment:
+    flavor: compose
+    mode: docker
+  # The MCP server is optional for this project (Track B uses the REST API).
+  # To enable it, set enabled: true (needs host port 8000 free) and re-cast.
+  mcp:
+    spec:
+      enabled: false
