@@ -1,0 +1,13 @@
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: signoz
+spec:
+  deployment:
+    flavor: compose
+    mode: docker
+  # The SigNoz MCP server, deployed alongside the stack (needs host port 8000).
+  # The reliability agent uses it as a first-class read path in addition to REST.
+  mcp:
+    spec:
+      enabled: true

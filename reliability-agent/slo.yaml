@@ -1,0 +1,24 @@
+# SLO-as-code for the reliability agent.
+# Targets may be a percentage (99) or a fraction (0.99).
+service: support-agent
+environment: local
+
+# Telemetry-completeness gate: SLOs with requires_completeness are trusted only
+# when these metrics have data. Add a metric your app does not emit yet to see a
+# healthy-looking SLO correctly reported as "indeterminate".
+completeness:
+  expected_metrics:
+    - agent_requests_total
+    - agent_success_total
+
+slos:
+  - name: successful-agent-runs
+    description: Agent runs should complete without an error.
+    type: ratio
+    target: 99
+    window: 30d
+    good_query: agent_success_total
+    total_query: agent_requests_total
+    # Gate on the telemetry auditor: if telemetry is incomplete, the result is
+    # reported as indeterminate instead of a false green.
+    requires_completeness: true

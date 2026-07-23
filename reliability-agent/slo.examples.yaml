@@ -1,0 +1,40 @@
+# Examples of every supported SLI type. All four reduce to a good/total ratio;
+# the type gives semantic meaning and (for latency) auto-builds the queries.
+service: support-agent
+environment: local
+
+slos:
+  # 1. ratio: good/total from explicit PromQL.
+  - name: successful-agent-runs
+    type: ratio
+    target: 99
+    window: 30d
+    good_query: agent_success_total
+    total_query: agent_requests_total
+    requires_completeness: true
+
+  # 2. latency_threshold: fraction of requests under the latency budget. Queries
+  #    are built from the histogram metric's _bucket and _count series.
+  - name: model-latency
+    type: latency_threshold
+    target: 99
+    window: 30d
+    latency_metric: gen_ai_server_request_duration
+    threshold_ms: 3000
+
+  # 3. completeness: fraction of agent runs with the expected trace tree,
+  #    expressed as good/total (emit a completeness marker metric).
+  - name: telemetry-completeness
+    type: completeness
+    target: 98
+    window: 7d
+    good_query: agent_complete_traces_total
+    total_query: agent_requests_total
+
+  # 4. grounded_answers: fraction of answers supported by retrieved evidence.
+  - name: grounded-answers
+    type: grounded_answers
+    target: 95
+    window: 30d
+    good_query: agent_grounded_total
+    total_query: agent_answers_total
