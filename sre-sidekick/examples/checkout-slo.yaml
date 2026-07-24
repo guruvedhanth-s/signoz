@@ -10,8 +10,8 @@ slos:
     window: 30d
     requires_completeness: true
     completeness_threshold: 0.95
-    good_query: increase(http_server_request_success_total{service_name="checkout-api",environment="test"}[30d])
-    total_query: increase(http_server_request_total{service_name="checkout-api",environment="test"}[30d])
+    good_metric: http_server_request_success_total
+    total_metric: http_server_request_total
     dependencies:
       - http_server_request_success_total
       - http_server_request_total

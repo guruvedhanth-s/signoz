@@ -118,11 +118,8 @@ func TestCompleteAuthenticatedAPIAndSLOFlow(t *testing.T) {
 	}
 
 	for _, query := range observedQueries() {
-		if strings.Contains(query, "count_over_time(") {
-			continue
-		}
-		if !strings.Contains(query, `service_name="checkout-api"`) ||
-			!strings.Contains(query, `environment="test"`) {
+		if !strings.Contains(query, `service_name = 'checkout-api'`) ||
+			!strings.Contains(query, `environment = 'test'`) {
 			t.Fatalf("live SLO query was not scoped: %s", query)
 		}
 	}
@@ -205,6 +202,11 @@ func TestCompleteAuditWatchFiringAndRecoveryFlow(t *testing.T) {
 	}
 }
 
+// newScalarSigNozServer stubs the SigNoz v5 builder-query scalar endpoint
+// the SLO engine and completeness gate now use. It records each query as
+// "<metric>{<filter expression>}" so tests can assert on scoping, and
+// responds using SigNoz's ScalarData shape (aggregation columns plus data
+// rows) that scalarBuilderResponse in internal/source/signoz parses.
 func newScalarSigNozServer(t *testing.T) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
@@ -218,7 +220,13 @@ func newScalarSigNozServer(t *testing.T) (*httptest.Server, func() []string) {
 			CompositeQuery struct {
 				Queries []struct {
 					Spec struct {
-						Query string `json:"query"`
+						Aggregations []struct {
+							MetricName      string `json:"metricName"`
+							TimeAggregation string `json:"timeAggregation"`
+						} `json:"aggregations"`
+						Filter struct {
+							Expression string `json:"expression"`
+						} `json:"filter"`
 					} `json:"spec"`
 				} `json:"queries"`
 			} `json:"compositeQuery"`
@@ -228,40 +236,40 @@ func newScalarSigNozServer(t *testing.T) (*httptest.Server, func() []string) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(request.CompositeQuery.Queries) != 1 {
+		if len(request.CompositeQuery.Queries) != 1 || len(request.CompositeQuery.Queries[0].Spec.Aggregations) != 1 {
 			t.Errorf("unexpected scalar request: %+v", request)
 			http.Error(w, "missing query", http.StatusBadRequest)
 			return
 		}
-		query := request.CompositeQuery.Queries[0].Spec.Query
+		spec := request.CompositeQuery.Queries[0].Spec
+		metric := spec.Aggregations[0].MetricName
+		timeAggregation := spec.Aggregations[0].TimeAggregation
+		filter := spec.Filter.Expression
 		mu.Lock()
-		queries = append(queries, query)
+		queries = append(queries, fmt.Sprintf("%s{%s}", metric, filter))
 		mu.Unlock()
 
 		value := 1.0
 		switch {
-		case strings.Contains(query, "count_over_time("):
+		case timeAggregation == "count":
 			value = 1
-		case strings.Contains(query, "request_success_total"):
+		case metric == "http_server_request_success_total":
 			value = 995
-		case strings.Contains(query, "request_total"):
+		case metric == "http_server_request_total":
 			value = 1000
-		case strings.Contains(query, "_bucket"):
+		case strings.HasSuffix(metric, "_bucket"):
 			value = 990
-		case strings.Contains(query, "_count"):
+		case strings.HasSuffix(metric, "_count"):
 			value = 1000
 		default:
-			t.Errorf("unexpected scalar query: %s", query)
+			t.Errorf("unexpected scalar query: %+v", spec)
 		}
 		writeJSON(t, w, map[string]any{
 			"data": map[string]any{"data": map[string]any{"results": []any{
-				map[string]any{"aggregations": []any{
-					map[string]any{"series": []any{
-						map[string]any{"values": []any{
-							map[string]any{"value": value, "partial": false},
-						}},
-					}},
-				}},
+				map[string]any{
+					"columns": []any{map[string]any{"columnType": "aggregation"}},
+					"data":    []any{[]any{value}},
+				},
 			}}},
 		})
 	}))

@@ -30,8 +30,8 @@ type Definition struct {
 	Type                  SLIType  `yaml:"type" json:"type"`
 	Target                float64  `yaml:"target" json:"target"`
 	Window                string   `yaml:"window" json:"window"`
-	GoodQuery             string   `yaml:"good_query" json:"good_query,omitempty"`
-	TotalQuery            string   `yaml:"total_query" json:"total_query,omitempty"`
+	GoodMetric            string   `yaml:"good_metric" json:"good_metric,omitempty"`
+	TotalMetric           string   `yaml:"total_metric" json:"total_metric,omitempty"`
 	LatencyMetric         string   `yaml:"latency_metric" json:"latency_metric,omitempty"`
 	ThresholdMS           float64  `yaml:"threshold_ms" json:"threshold_ms,omitempty"`
 	RequiresCompleteness  bool     `yaml:"requires_completeness" json:"requires_completeness,omitempty"`
@@ -67,14 +67,6 @@ func (c Config) Validate() error {
 	for i, definition := range c.SLOs {
 		if err := definition.Validate(); err != nil {
 			return fmt.Errorf("slos[%d]: %w", i, err)
-		}
-		if definition.Type != SLITypeLatencyThreshold {
-			if err := c.validateQueryScope("good_query", definition.GoodQuery); err != nil {
-				return fmt.Errorf("slos[%d]: %w", i, err)
-			}
-			if err := c.validateQueryScope("total_query", definition.TotalQuery); err != nil {
-				return fmt.Errorf("slos[%d]: %w", i, err)
-			}
 		}
 		if definition.RequiresCompleteness &&
 			len(definition.Dependencies) == 0 &&
@@ -112,14 +104,8 @@ func (d Definition) Validate() error {
 	}
 	switch d.Type {
 	case SLITypeRatio, SLITypeCompleteness, SLITypeGroundedAnswers:
-		if strings.TrimSpace(d.GoodQuery) == "" || strings.TrimSpace(d.TotalQuery) == "" {
-			return fmt.Errorf("%s requires good_query and total_query", d.Type)
-		}
-		if err := validateWindowedCounterQuery("good_query", d.GoodQuery, d.Window); err != nil {
-			return err
-		}
-		if err := validateWindowedCounterQuery("total_query", d.TotalQuery, d.Window); err != nil {
-			return err
+		if strings.TrimSpace(d.GoodMetric) == "" || strings.TrimSpace(d.TotalMetric) == "" {
+			return fmt.Errorf("%s requires good_metric and total_metric", d.Type)
 		}
 	case SLITypeLatencyThreshold:
 		if strings.TrimSpace(d.LatencyMetric) == "" || d.ThresholdMS <= 0 {
@@ -179,29 +165,4 @@ func (c Config) MetricLabels() (string, string) {
 	return serviceLabel, environmentLabel
 }
 
-func validateWindowedCounterQuery(field, query, window string) error {
-	compact := strings.ToLower(strings.Join(strings.Fields(query), ""))
-	if !strings.Contains(compact, "increase(") && !strings.Contains(compact, "rate(") {
-		return fmt.Errorf("%s must use rate() or increase() over the configured SLO window", field)
-	}
-	windowSelector := "[" + strings.ToLower(strings.TrimSpace(window)) + "]"
-	if !strings.Contains(compact, windowSelector) {
-		return fmt.Errorf("%s must use the configured SLO window %s", field, window)
-	}
-	return nil
-}
 
-func (c Config) validateQueryScope(field, query string) error {
-	serviceLabel, environmentLabel := c.MetricLabels()
-	compact := strings.Join(strings.Fields(query), "")
-	requiredMatchers := []string{
-		fmt.Sprintf(`%s="%s"`, serviceLabel, escape(c.Service)),
-		fmt.Sprintf(`%s="%s"`, environmentLabel, escape(c.Environment)),
-	}
-	for _, matcher := range requiredMatchers {
-		if !strings.Contains(compact, matcher) {
-			return fmt.Errorf("%s must include exact scope matcher %s", field, matcher)
-		}
-	}
-	return nil
-}

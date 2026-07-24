@@ -3,8 +3,16 @@ package signoz
 import (
 	"context"
 	"fmt"
+
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
 )
 
+// Scalar issues a single PromQL scalar read against SigNoz. It remains
+// available as a general-purpose escape hatch, but the SLO engine no
+// longer uses it: PromQL label matchers against these OTel metric
+// attributes have proven unreliable against live SigNoz - sometimes
+// returning no data, sometimes returning a value from the wrong series -
+// so every SLO metric read goes through ScalarBuilder instead.
 func (c *Client) Scalar(ctx context.Context, expression string, startMs, endMs uint64) (float64, error) {
 	request := map[string]any{
 		"schemaVersion": "v5",
@@ -64,4 +72,102 @@ func (r queryRangeResponse) scalar() (float64, error) {
 		}
 	}
 	return 0, fmt.Errorf("only partial or empty values in SigNoz query response")
+}
+
+// ScalarBuilder issues a single SigNoz builder-query scalar read for
+// query, reduced to one number over [startMs, endMs]. Builder queries,
+// unlike PromQL, filter correctly on the OTel metric attributes SLOs are
+// scoped by, which is why the SLO engine and completeness gate use this
+// instead of Scalar.
+//
+// SigNoz's v5 "scalar" request type still buckets metric aggregations into
+// steps (60s by default, coarser for long windows) instead of collapsing
+// the whole range into one point, so the aggregation spec sets reduceTo
+// "sum": summing the per-step values across the window yields the total
+// for the whole range (an "increase" time aggregation summed per-step
+// gives the total increase; a "count" time aggregation summed per-step
+// gives the total sample count, which is what the completeness gate uses
+// to check presence). Once reduceTo is set, the response comes back in
+// SigNoz's ScalarData shape (aggregation columns plus data rows), not the
+// TimeSeriesData shape Scalar parses, so it needs its own extraction.
+func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, startMs, endMs uint64) (float64, error) {
+	timeAggregation := query.TimeAggregation
+	if timeAggregation == "" {
+		timeAggregation = "increase"
+	}
+	spaceAggregation := query.SpaceAggregation
+	if spaceAggregation == "" {
+		spaceAggregation = "sum"
+	}
+	temporality := query.Temporality
+	if temporality == "" {
+		temporality = "Cumulative"
+	}
+	request := map[string]any{
+		"schemaVersion": "v5",
+		"start":         startMs,
+		"end":           endMs,
+		"requestType":   "scalar",
+		"noCache":       true,
+		"compositeQuery": map[string]any{
+			"queries": []any{
+				map[string]any{
+					"type": "builder_query",
+					"spec": map[string]any{
+						"name":   "A",
+						"signal": "metrics",
+						"aggregations": []any{
+							map[string]any{
+								"metricName":       query.Metric,
+								"temporality":      temporality,
+								"timeAggregation":  timeAggregation,
+								"spaceAggregation": spaceAggregation,
+								"reduceTo":         "sum",
+							},
+						},
+						"filter": map[string]any{"expression": query.Filter},
+					},
+				},
+			},
+		},
+	}
+	var response scalarBuilderResponse
+	if err := c.QueryRange(ctx, request, &response); err != nil {
+		return 0, err
+	}
+	return response.scalar(), nil
+}
+
+// scalarBuilderResponse parses SigNoz's ScalarData response shape:
+// aggregation columns plus data rows. A metric with no samples in the
+// window (never instrumented, or a real zero increase) comes back with no
+// columns and no rows; that is a valid answer of 0, not an error - see
+// MetricQuerier's documented contract. The SLO engine's total<=0 check is
+// what turns a genuinely absent total metric into ErrNoData.
+type scalarBuilderResponse struct {
+	Data struct {
+		Data struct {
+			Results []struct {
+				Columns []struct {
+					ColumnType string `json:"columnType"`
+				} `json:"columns"`
+				Data [][]float64 `json:"data"`
+			} `json:"results"`
+		} `json:"data"`
+	} `json:"data"`
+}
+
+func (r scalarBuilderResponse) scalar() float64 {
+	var sum float64
+	for _, result := range r.Data.Data.Results {
+		for _, row := range result.Data {
+			for i, column := range result.Columns {
+				if column.ColumnType != "aggregation" || i >= len(row) {
+					continue
+				}
+				sum += row[i]
+			}
+		}
+	}
+	return sum
 }

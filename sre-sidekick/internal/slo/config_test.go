@@ -22,39 +22,50 @@ func TestExampleSLOConfigsLoad(t *testing.T) {
 func TestTargetPercentageAndOneHundredPercent(t *testing.T) {
 	percentage := Definition{
 		Name: "x", Type: SLITypeRatio, Target: 99, Window: "1h",
-		GoodQuery: "increase(good[1h])", TotalQuery: "increase(total[1h])",
+		GoodMetric: "good", TotalMetric: "total",
 	}
 	if err := percentage.Validate(); err != nil || percentage.NormalizedTarget() != 0.99 {
 		t.Fatalf("percentage target did not normalize: err=%v target=%v", err, percentage.NormalizedTarget())
 	}
 	one := Definition{
 		Name: "x", Type: SLITypeRatio, Target: 1, Window: "1h",
-		GoodQuery: "increase(good[1h])", TotalQuery: "increase(total[1h])",
+		GoodMetric: "good", TotalMetric: "total",
 	}
 	if err := one.Validate(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestRatioQueriesMustUseConfiguredWindow(t *testing.T) {
-	definition := Definition{
-		Name: "x", Type: SLITypeRatio, Target: 0.99, Window: "30d",
-		GoodQuery: "sum(good_total)", TotalQuery: "increase(total[5m])",
+func TestRatioRequiresGoodAndTotalMetric(t *testing.T) {
+	missingGood := Definition{Name: "x", Type: SLITypeRatio, Target: 0.99, Window: "1h", TotalMetric: "total"}
+	if err := missingGood.Validate(); err == nil {
+		t.Fatal("expected missing good_metric to be rejected")
 	}
-	if err := definition.Validate(); err == nil {
-		t.Fatal("expected unsafe counter queries to be rejected")
+	missingTotal := Definition{Name: "x", Type: SLITypeRatio, Target: 0.99, Window: "1h", GoodMetric: "good"}
+	if err := missingTotal.Validate(); err == nil {
+		t.Fatal("expected missing total_metric to be rejected")
 	}
 }
 
-func TestConfigRejectsUnscopedRatioQueries(t *testing.T) {
+func TestLatencyThresholdRequiresMetricAndPositiveThreshold(t *testing.T) {
+	missingMetric := Definition{Name: "x", Type: SLITypeLatencyThreshold, Target: 0.99, Window: "1h", ThresholdMS: 1000}
+	if err := missingMetric.Validate(); err == nil {
+		t.Fatal("expected missing latency_metric to be rejected")
+	}
+	nonPositiveThreshold := Definition{Name: "x", Type: SLITypeLatencyThreshold, Target: 0.99, Window: "1h", LatencyMetric: "duration"}
+	if err := nonPositiveThreshold.Validate(); err == nil {
+		t.Fatal("expected non-positive threshold_ms to be rejected")
+	}
+}
+
+func TestConfigRequiresServiceAndEnvironment(t *testing.T) {
 	cfg := Config{
-		Service: "checkout-api", Environment: "test",
 		SLOs: []Definition{{
 			Name: "x", Type: SLITypeRatio, Target: 0.99, Window: "1h",
-			GoodQuery: "increase(good[1h])", TotalQuery: "increase(total[1h])",
+			GoodMetric: "good", TotalMetric: "total",
 		}},
 	}
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected unscoped ratio queries to be rejected")
+		t.Fatal("expected missing service/environment to be rejected")
 	}
 }

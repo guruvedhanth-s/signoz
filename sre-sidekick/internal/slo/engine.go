@@ -4,32 +4,30 @@ import (
 	"context"
 	"fmt"
 	"time"
-)
 
-type ScalarQuerier interface {
-	Scalar(context.Context, string, uint64, uint64) (float64, error)
-}
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
+)
 
 type CompletenessGate interface {
 	Check(context.Context, GateRequest) (GateResult, error)
 }
 
 type Engine struct {
-	Scalar ScalarQuerier
-	Gate   CompletenessGate
-	Now    func() time.Time
+	Metrics source.MetricQuerier
+	Gate    CompletenessGate
+	Now     func() time.Time
 }
 
-func NewEngine(scalar ScalarQuerier, gate CompletenessGate) *Engine {
-	return &Engine{Scalar: scalar, Gate: gate, Now: time.Now}
+func NewEngine(metrics source.MetricQuerier, gate CompletenessGate) *Engine {
+	return &Engine{Metrics: metrics, Gate: gate, Now: time.Now}
 }
 
 func (e *Engine) Evaluate(ctx context.Context, cfg Config, now time.Time) ([]Report, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if e.Scalar == nil {
-		return nil, fmt.Errorf("SLO scalar querier is required")
+	if e.Metrics == nil {
+		return nil, fmt.Errorf("SLO metric querier is required")
 	}
 	if now.IsZero() {
 		now = e.Now()
@@ -88,7 +86,7 @@ func (e *Engine) evaluate(ctx context.Context, cfg Config, definition Definition
 
 	start := uint64(now.Add(-duration).UnixMilli())
 	end := uint64(now.UnixMilli())
-	sli, queryErr := evaluateSLI(ctx, e.Scalar, cfg, definition, start, end)
+	sli, queryErr := evaluateSLI(ctx, e.Metrics, cfg, definition, start, end)
 	if queryErr != nil {
 		return indeterminate(report, queryErr)
 	}

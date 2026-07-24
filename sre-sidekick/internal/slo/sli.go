@@ -6,23 +6,25 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
 )
 
 var ErrNoData = errors.New("no data in SLO window")
 
-func evaluateSLI(ctx context.Context, querier ScalarQuerier, cfg Config, definition Definition, start, end uint64) (float64, error) {
-	goodQuery, totalQuery, err := deriveQueries(cfg, definition)
+func evaluateSLI(ctx context.Context, querier source.MetricQuerier, cfg Config, definition Definition, start, end uint64) (float64, error) {
+	goodQuery, totalQuery, err := deriveMetricQueries(cfg, definition)
 	if err != nil {
 		return 0, err
 	}
-	total, err := querier.Scalar(ctx, totalQuery, start, end)
+	total, err := querier.ScalarBuilder(ctx, totalQuery, start, end)
 	if err != nil {
 		return 0, fmt.Errorf("total query: %w", err)
 	}
 	if total <= 0 {
 		return 0, ErrNoData
 	}
-	good, err := querier.Scalar(ctx, goodQuery, start, end)
+	good, err := querier.ScalarBuilder(ctx, goodQuery, start, end)
 	if err != nil {
 		return 0, fmt.Errorf("good query: %w", err)
 	}
@@ -35,61 +37,60 @@ func evaluateSLI(ctx context.Context, querier ScalarQuerier, cfg Config, definit
 	return good / total, nil
 }
 
-func deriveQueries(cfg Config, definition Definition) (string, string, error) {
+// deriveMetricQueries builds the good/total builder queries for a
+// definition, scoped to cfg.Service/cfg.Environment (and, for latency
+// SLIs, the threshold bucket). The window is deliberately not part of
+// either query: Engine.evaluate already picks [start,end] from
+// definition.Window before calling ScalarBuilder, and the "increase" time
+// aggregation reduces over exactly that range, so the same MetricQuery
+// works unchanged across windows (see EvaluateMultiWindow).
+func deriveMetricQueries(cfg Config, definition Definition) (source.MetricQuery, source.MetricQuery, error) {
+	serviceLabel, environmentLabel := cfg.MetricLabels()
+	filter := scopeExpression(cfg.Service, cfg.Environment, serviceLabel, environmentLabel)
 	switch definition.Type {
 	case SLITypeRatio, SLITypeCompleteness, SLITypeGroundedAnswers:
-		return definition.GoodQuery, definition.TotalQuery, nil
+		return counterQuery(definition.GoodMetric, filter), counterQuery(definition.TotalMetric, filter), nil
 	case SLITypeLatencyThreshold:
-		le := strconv.FormatFloat(definition.ThresholdMS/1000, 'f', -1, 64)
-		window := strings.TrimSpace(definition.Window)
-		serviceLabel, environmentLabel := cfg.MetricLabels()
-		bucket, err := histogramMetric(definition.LatencyMetric, "_bucket")
-		if err != nil {
-			return "", "", err
+		metric := strings.TrimSpace(definition.LatencyMetric)
+		if metric == "" {
+			return source.MetricQuery{}, source.MetricQuery{}, fmt.Errorf("latency metric is empty")
 		}
-		count, err := histogramMetric(definition.LatencyMetric, "_count")
-		if err != nil {
-			return "", "", err
-		}
-		bucket = scopedMetric(bucket, cfg.Service, cfg.Environment, serviceLabel, environmentLabel)
-		bucket = addMatcher(bucket, fmt.Sprintf(`le="%s"`, le))
-		count = scopedMetric(count, cfg.Service, cfg.Environment, serviceLabel, environmentLabel)
-		good := fmt.Sprintf("sum(increase(%s[%s]))", bucket, window)
-		total := fmt.Sprintf("sum(increase(%s[%s]))", count, window)
+		thresholdSeconds := strconv.FormatFloat(definition.ThresholdMS/1000, 'f', -1, 64)
+		bucketFilter := filter + fmt.Sprintf(" AND le = '%s'", thresholdSeconds)
+		good := counterQuery(metric+"_bucket", bucketFilter)
+		total := counterQuery(metric+"_count", filter)
 		return good, total, nil
 	default:
-		return "", "", fmt.Errorf("unsupported SLI type %q", definition.Type)
+		return source.MetricQuery{}, source.MetricQuery{}, fmt.Errorf("unsupported SLI type %q", definition.Type)
 	}
 }
 
-func histogramMetric(metric, suffix string) (string, error) {
-	metric = strings.TrimSpace(metric)
-	if metric == "" {
-		return "", fmt.Errorf("latency metric is empty")
+func counterQuery(metric, filter string) source.MetricQuery {
+	return source.MetricQuery{
+		Metric:           strings.TrimSpace(metric),
+		Filter:           filter,
+		TimeAggregation:  "increase",
+		SpaceAggregation: "sum",
+		Temporality:      "Cumulative",
 	}
-	if open := strings.Index(metric, "{"); open >= 0 {
-		name := strings.TrimSpace(metric[:open])
-		if name == "" {
-			return "", fmt.Errorf("invalid latency metric %q", metric)
-		}
-		return name + suffix + metric[open:], nil
-	}
-	return metric + suffix, nil
 }
 
-func addMatcher(metric, matcher string) string {
-	open := strings.Index(metric, "{")
-	if open < 0 {
-		return metric + "{" + matcher + "}"
+// scopeExpression builds the builder filter expression that scopes a
+// metric read to a service and environment, e.g.
+// "service_name = 'support-agent' AND environment = 'local'". The engine
+// always builds this from cfg.Service/cfg.Environment, so an SLO
+// definition can never be misconfigured with the wrong scope the way a
+// hand-written PromQL matcher could.
+func scopeExpression(service, environment, serviceLabel, environmentLabel string) string {
+	if serviceLabel == "" {
+		serviceLabel = "service_name"
 	}
-	close := strings.Index(metric[open:], "}")
-	if close < 0 {
-		return metric
+	if environmentLabel == "" {
+		environmentLabel = "environment"
 	}
-	close += open
-	inside := strings.TrimSpace(metric[open+1 : close])
-	if inside == "" {
-		return metric[:open+1] + matcher + metric[close:]
-	}
-	return metric[:close] + "," + matcher + metric[close:]
+	return fmt.Sprintf("%s = '%s' AND %s = '%s'", serviceLabel, escapeFilterValue(service), environmentLabel, escapeFilterValue(environment))
+}
+
+func escapeFilterValue(value string) string {
+	return strings.ReplaceAll(value, "'", "\\'")
 }
