@@ -122,8 +122,8 @@ Supported `data_kind` values are `backend`, `ai_agent`, `worker`, and `custom`.
 
 ## Track B: SLO evaluation
 
-Track B queries SigNoz using service- and environment-scoped PromQL. It
-supports:
+Track B queries SigNoz using service- and environment-scoped SigNoz builder
+queries. It supports:
 
 - success or quality ratios;
 - latency-threshold SLIs;
@@ -148,18 +148,22 @@ slos:
     window: 30d
     requires_completeness: true
     completeness_threshold: 0.95
-    good_query: increase(http_server_request_success_total{service_name="checkout-api",environment="test"}[30d])
-    total_query: increase(http_server_request_total{service_name="checkout-api",environment="test"}[30d])
+    good_metric: http_server_request_success_total
+    total_metric: http_server_request_total
     dependencies:
       - http_server_request_success_total
       - http_server_request_total
 ```
 
-Ratio, completeness, and grounded-answer queries must use `rate()` or
-`increase()` over the exact configured SLO window. This prevents cumulative
-counters or a mismatched short range from silently producing an incorrect SLI.
-Generated latency queries automatically include the configured service,
-environment, and any selectors already present on the histogram metric.
+`good_metric`/`total_metric` name counters only; the engine builds the
+actual SigNoz builder query (metric, filter, and `increase`/`sum`
+aggregation) itself, scoped to `service`/`environment` and the SLO's
+`window`. A config can therefore never end up with a mismatched or
+misspelled scope matcher the way a hand-written PromQL query could -
+and PromQL label matchers against these OTel metric attributes have
+proven unreliable against live SigNoz, which is why Track B does not use
+PromQL for SLO reads. Latency queries are built the same way, against the
+histogram's generated `_bucket`/`_count` metrics.
 
 Examples:
 

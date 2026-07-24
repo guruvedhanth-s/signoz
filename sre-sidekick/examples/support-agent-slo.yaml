@@ -7,11 +7,17 @@ slos:
     description: Answers should be grounded in retrieved evidence.
     type: grounded_answers
     target: 0.95
-    window: 30d
+    # 1h keeps this demo config aligned with a live demo-agent that has
+    # only been emitting telemetry for minutes: SigNoz widens the query
+    # step for very long windows (30d), and "increase" cannot be computed
+    # for a step that does not yet contain two samples. A production
+    # config for a long-running service should use a longer window (e.g.
+    # 30d) instead.
+    window: 1h
     requires_completeness: true
     completeness_threshold: 0.95
-    good_query: increase(agent_grounded_answers_total{service_name="support-agent",environment="local"}[30d])
-    total_query: increase(agent_evaluated_answers_total{service_name="support-agent",environment="local"}[30d])
+    good_metric: agent_grounded_answers_total
+    total_metric: agent_evaluated_answers_total
     dependencies:
       - agent_grounded_answers_total
       - agent_evaluated_answers_total
