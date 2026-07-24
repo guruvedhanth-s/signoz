@@ -18,6 +18,7 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/alerting"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/api"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/audit"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mcp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/monitor"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/otlp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/profile"
@@ -143,6 +144,8 @@ func runDiagnose(args []string) error {
 	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
 	limit := fs.Int("limit", 200, "maximum records per signal query")
+	mcpURL := fs.String("mcp-url", os.Getenv("SIGNOZ_MCP_URL"), "SigNoz MCP server URL; when set, evidence is gathered live via MCP tools instead of the M1 telemetry-source placeholder")
+	signozInternalURL := fs.String("signoz-internal-url", os.Getenv("SIGNOZ_INTERNAL_URL"), "SigNoz URL the MCP server should use to reach SigNoz (sent as the X-SigNoz-URL header); required when --mcp-url is set")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
@@ -152,11 +155,23 @@ func runDiagnose(args []string) error {
 	if *service == "" {
 		return fmt.Errorf("--service is required")
 	}
+	if *mcpURL != "" && *signozInternalURL == "" {
+		return fmt.Errorf("--signoz-internal-url (or SIGNOZ_INTERNAL_URL) is required when --mcp-url is set")
+	}
 
 	client := signoz.NewClient(*signozURL, *apiKey)
 	agent := &rca.Agent{
 		Gate:     &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
 		Reasoner: rca.StubReasoner{},
+	}
+
+	ctx := context.Background()
+	if *mcpURL != "" {
+		mcpClient := mcp.NewClient(*mcpURL, *apiKey, *signozInternalURL, nil)
+		if err := mcpClient.Initialize(ctx); err != nil {
+			return fmt.Errorf("connect to SigNoz MCP server: %w", err)
+		}
+		agent.EvidenceSource = &rca.MCPEvidenceSource{Client: mcpClient}
 	}
 
 	// TODO(M2+): once the alert webhook and SLO engine are wired to this
@@ -168,7 +183,7 @@ func runDiagnose(args []string) error {
 		Window:      *window,
 	}
 
-	diagnosis, err := agent.Diagnose(context.Background(), incident)
+	diagnosis, err := agent.Diagnose(ctx, incident)
 	if err != nil {
 		return err
 	}

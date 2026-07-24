@@ -21,6 +21,12 @@ const maxEvidenceItems = 10
 type Agent struct {
 	Gate     EvidenceGate
 	Reasoner Reasoner
+	// EvidenceSource, when set, replaces the M1 gatherEvidence(snapshot)
+	// placeholder: Diagnose calls EvidenceSource.Gather(ctx, inc) instead of
+	// building evidence from the snapshot the evidence gate fetched. This is
+	// the seam MCPEvidenceSource (evidence_mcp.go) plugs into. When nil (the
+	// default), M1 behavior is unchanged.
+	EvidenceSource EvidenceSource
 	// Now returns the current time; overridable in tests. Defaults to
 	// time.Now.
 	Now func() time.Time
@@ -50,7 +56,10 @@ func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, e
 		return a.indeterminate(inc, result), nil
 	}
 
-	ev := gatherEvidence(inc, snapshot)
+	ev, err := a.gatherEvidence(ctx, inc, snapshot)
+	if err != nil {
+		return notify.Diagnosis{}, fmt.Errorf("rca: gather evidence: %w", err)
+	}
 	md, err := a.Reasoner.Reason(ctx, inc, ev)
 	if err != nil {
 		return notify.Diagnosis{}, fmt.Errorf("rca: reason: %w", err)
@@ -104,18 +113,32 @@ func missingEvidence(result EvidenceResult) []string {
 	return missing
 }
 
-// gatherEvidence turns a snapshot into the notify.Evidence list a
-// diagnosis can cite. Evidence ids ("e1", "e2", ...) are only stable
+// gatherEvidence dispatches to a.EvidenceSource when one is configured
+// (e.g. MCPEvidenceSource, which calls live SigNoz MCP tools), and falls
+// back to the M1 snapshot-based placeholder otherwise. This is the seam
+// that lets Milestone 3 replace M1's evidence gathering without touching
+// any caller of Agent.Diagnose.
+func (a *Agent) gatherEvidence(ctx context.Context, inc Incident, snapshot evidence.Snapshot) ([]notify.Evidence, error) {
+	if a.EvidenceSource != nil {
+		return a.EvidenceSource.Gather(ctx, inc)
+	}
+	return gatherEvidenceFromSnapshot(inc, snapshot), nil
+}
+
+// gatherEvidenceFromSnapshot turns a snapshot into the notify.Evidence list
+// a diagnosis can cite. Evidence ids ("e1", "e2", ...) are only stable
 // within one Diagnose call - Render only needs ids that resolve within the
 // same diagnosis, not across calls.
 //
 // SignozLink is a placeholder built from the incident's
 // service/environment/window, not a real deep link to the query or record
 // that produced each piece of evidence: building a precise deep link
-// requires the SigNoz MCP server (a later milestone) which knows how to
-// construct a link to the exact query. Documented here so it is not
-// mistaken for a precise link.
-func gatherEvidence(inc Incident, snapshot evidence.Snapshot) []notify.Evidence {
+// requires the SigNoz MCP server (see MCPEvidenceSource in
+// evidence_mcp.go, which does exactly that) which knows how to construct a
+// link to the exact query. Documented here so it is not mistaken for a
+// precise link. This function only runs when no EvidenceSource is
+// configured on Agent.
+func gatherEvidenceFromSnapshot(inc Incident, snapshot evidence.Snapshot) []notify.Evidence {
 	var out []notify.Evidence
 	add := func(kind notify.EvidenceKind, records []evidence.Record) {
 		for _, r := range records {
