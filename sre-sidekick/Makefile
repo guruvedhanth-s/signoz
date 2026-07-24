@@ -1,4 +1,4 @@
-.PHONY: fmt test run run-log-demo watch-logs
+.PHONY: fmt test run run-demo-agent run-demo-agent-buggy watch-logs
 
 fmt:
 	gofmt -w cmd internal
@@ -9,8 +9,11 @@ test:
 run:
 	go run ./cmd/reliability-agent
 
-run-log-demo:
-	go run ./cmd/log-demo-backend
+run-demo-agent:
+	go run ./cmd/demo-agent
+
+run-demo-agent-buggy:
+	go run ./cmd/demo-agent --buggy
 
 watch-logs:
-	go run ./cmd/reliability-agent audit-watch --profile examples/log-demo-backend.yaml
+	go run ./cmd/reliability-agent audit-watch --profile examples/demo-agent.yaml

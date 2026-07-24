@@ -20,7 +20,7 @@ func TestLogSourceQueriesAndNormalizesSigNozLogs(t *testing.T) {
 			t.Fatal(err)
 		}
 		encoded, _ := json.Marshal(request)
-		if !strings.Contains(string(encoded), "resource.service.name = 'log-demo-backend'") ||
+		if !strings.Contains(string(encoded), "resource.service.name = 'demo-agent'") ||
 			!strings.Contains(string(encoded), "resource.deployment.environment = 'demo'") {
 			t.Fatalf("query is not scoped: %s", encoded)
 		}
@@ -34,7 +34,7 @@ func TestLogSourceQueriesAndNormalizesSigNozLogs(t *testing.T) {
 						"severity_text":     "INFO",
 						"trace_id":          "abc123",
 						"attributes_string": map[string]any{"telemetry.demo.mode": "healthy"},
-						"resources_string":  map[string]any{"service.name": "log-demo-backend"},
+						"resources_string":  map[string]any{"service.name": "demo-agent"},
 					},
 				}},
 			}}}},
@@ -46,7 +46,7 @@ func TestLogSourceQueriesAndNormalizesSigNozLogs(t *testing.T) {
 		context.Background(),
 		profile.Profile{},
 		source.Target{
-			Service:     "log-demo-backend",
+			Service:     "demo-agent",
 			Environment: "demo",
 			Start:       time.Date(2026, 7, 23, 9, 59, 0, 0, time.UTC),
 			End:         time.Date(2026, 7, 23, 10, 0, 1, 0, time.UTC),
@@ -62,7 +62,7 @@ func TestLogSourceQueriesAndNormalizesSigNozLogs(t *testing.T) {
 		t.Fatalf("unexpected signal availability: %+v", snapshot.AvailableSignals)
 	}
 	fields := snapshot.Logs[0].Fields
-	if fields["trace_id"] != "abc123" || fields["service.name"] != "log-demo-backend" {
+	if fields["trace_id"] != "abc123" || fields["service.name"] != "demo-agent" {
 		t.Fatalf("fields were not flattened: %#v", fields)
 	}
 	if snapshot.LastSeen["body"].IsZero() || snapshot.DistinctValues["severity_text"] != 1 {

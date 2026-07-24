@@ -2,9 +2,9 @@ apiVersion: reliability/v1
 kind: TelemetryProfile
 
 metadata:
-  name: log-demo-backend
-  service: log-demo-backend
-  environment: demo
+  name: demo-agent
+  service: support-agent
+  environment: local
 
 spec:
   data_kind: backend
