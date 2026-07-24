@@ -132,6 +132,31 @@ func TestMCPEvidenceSource_Gather_MapsTracesAndLogsWithRealLinks(t *testing.T) {
 	}
 }
 
+func TestMCPEvidenceSource_Gather_RewritesLinksToPublicSignozURL(t *testing.T) {
+	fake := &fakeToolCaller{
+		results: map[string]mcp.ToolResult{
+			"signoz_search_traces": textResult(traceRowsJSON(
+				traceRow("tool.search_kb", "timed out", "trace-1", "span-1", "http://signoz-signoz-0:8080/trace/trace-1"),
+			)),
+			"signoz_get_trace_details": textResult(traceRowsJSON()),
+			"signoz_search_logs":       textResult(traceRowsJSON()),
+		},
+	}
+	source := &MCPEvidenceSource{Client: fake, PublicSignozURL: "http://localhost:8080"}
+
+	got, err := source.Gather(context.Background(), baseIncident())
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %+v, want exactly one trace evidence item", got)
+	}
+	want := "http://localhost:8080/trace/trace-1"
+	if got[0].SignozLink != want {
+		t.Errorf("SignozLink = %q, want %q (internal host rewritten to public)", got[0].SignozLink, want)
+	}
+}
+
 func TestMCPEvidenceSource_Gather_CallsTraceDetailsForTopTrace(t *testing.T) {
 	fake := &fakeToolCaller{
 		results: map[string]mcp.ToolResult{

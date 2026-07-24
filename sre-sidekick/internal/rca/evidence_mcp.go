@@ -54,6 +54,14 @@ type MCPEvidenceSource struct {
 	// metric of the many SigNoz can report is actually informative varies
 	// per service, so there is no safe universal default. Optional.
 	MetricName string
+	// PublicSignozURL, if set, is the externally-reachable SigNoz base URL
+	// (e.g. "http://localhost:8080") that every evidence SignozLink built
+	// from a tool result's webUrl is rewritten to point at (see
+	// RewriteLinkHost). The MCP server builds webUrl against whatever
+	// address it was told to use to reach SigNoz (X-SigNoz-URL), which may
+	// be an internal-only address a human cannot open. Left empty, links are
+	// passed through unchanged.
+	PublicSignozURL string
 }
 
 func (s *MCPEvidenceSource) now() time.Time {
@@ -184,7 +192,7 @@ func (s *MCPEvidenceSource) gatherTraces(ctx context.Context, inc Incident, star
 		if len(evs) >= maxEvidenceItems {
 			break
 		}
-		evs = append(evs, spanEvidence(notify.EvidenceKindTrace, record, inc))
+		evs = append(evs, s.spanEvidence(notify.EvidenceKindTrace, record, inc))
 		if topTraceID == "" {
 			if id, ok := record["trace_id"].(string); ok && id != "" {
 				topTraceID = id
@@ -222,7 +230,7 @@ func (s *MCPEvidenceSource) gatherTraceDetails(ctx context.Context, inc Incident
 		if !recordHasErrorFlag(record) {
 			continue
 		}
-		evs = append(evs, spanEvidence(notify.EvidenceKindTrace, record, inc))
+		evs = append(evs, s.spanEvidence(notify.EvidenceKindTrace, record, inc))
 	}
 	return evs
 }
@@ -248,7 +256,7 @@ func (s *MCPEvidenceSource) gatherLogs(ctx context.Context, inc Incident, start,
 		if len(evs) >= maxEvidenceItems {
 			break
 		}
-		evs = append(evs, logEvidence(record, inc))
+		evs = append(evs, s.logEvidence(record, inc))
 	}
 	return evs
 }
@@ -309,20 +317,20 @@ func (s *MCPEvidenceSource) gatherMetric(ctx context.Context, inc Incident, star
 // spanEvidence converts one trace-span record into evidence, preferring
 // the record's own webUrl (a real SigNoz deep link to that trace) over
 // the generic scoped placeholder link.
-func spanEvidence(kind notify.EvidenceKind, record map[string]any, inc Incident) notify.Evidence {
+func (s *MCPEvidenceSource) spanEvidence(kind notify.EvidenceKind, record map[string]any, inc Incident) notify.Evidence {
 	fields := SanitizeFields(record, traceFieldAllowlist)
 	return notify.Evidence{
 		Kind:       kind,
-		SignozLink: recordLink(record, inc),
+		SignozLink: s.recordLink(record, inc),
 		Note:       SanitizeNote(formatTraceNote(fields)),
 	}
 }
 
-func logEvidence(record map[string]any, inc Incident) notify.Evidence {
+func (s *MCPEvidenceSource) logEvidence(record map[string]any, inc Incident) notify.Evidence {
 	fields := SanitizeFields(record, logFieldAllowlist)
 	return notify.Evidence{
 		Kind:       notify.EvidenceKindLog,
-		SignozLink: recordLink(record, inc),
+		SignozLink: s.recordLink(record, inc),
 		Note:       SanitizeNote(formatLogNote(fields)),
 	}
 }
@@ -378,9 +386,14 @@ func formatLogNote(fields map[string]string) string {
 // this for spans but not, in current server versions, for logs. When
 // absent, a scoped-but-imprecise fallback link is used instead, so it is
 // clear from the incident alone what the evidence is about even without a
-// precise deep link.
-func recordLink(record map[string]any, inc Incident) string {
+// precise deep link. A present webUrl is rewritten to PublicSignozURL (see
+// RewriteLinkHost) so a human can actually open it; the placeholder
+// fallback is not, since it is not a real link to begin with.
+func (s *MCPEvidenceSource) recordLink(record map[string]any, inc Incident) string {
 	if link, ok := record["webUrl"].(string); ok && link != "" {
+		if s.PublicSignozURL != "" {
+			return RewriteLinkHost(link, s.PublicSignozURL)
+		}
 		return link
 	}
 	return placeholderLink(inc)

@@ -20,6 +20,7 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/audit"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mcp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/monitor"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/otlp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/profile"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
@@ -141,11 +142,12 @@ func runDiagnose(args []string) error {
 	service := fs.String("service", "", "service name to diagnose")
 	environment := fs.String("environment", "", "deployment environment (e.g. prod, staging)")
 	window := fs.String("window", "1h", "lookback window for evidence gathering (e.g. 1h, 30m, 7d)")
-	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
+	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL (also used as the public host rewritten into evidence links)")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
 	limit := fs.Int("limit", 200, "maximum records per signal query")
 	mcpURL := fs.String("mcp-url", os.Getenv("SIGNOZ_MCP_URL"), "SigNoz MCP server URL; when set, evidence is gathered live via MCP tools instead of the M1 telemetry-source placeholder")
 	signozInternalURL := fs.String("signoz-internal-url", os.Getenv("SIGNOZ_INTERNAL_URL"), "SigNoz URL the MCP server should use to reach SigNoz (sent as the X-SigNoz-URL header); required when --mcp-url is set")
+	sloConfigPath := fs.String("slo-config", "examples/support-agent-slo.yaml", "SLO YAML path used to ground this diagnosis's grounding facts (SLO state, burn rate, error budget, telemetry trust)")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
@@ -159,37 +161,113 @@ func runDiagnose(args []string) error {
 		return fmt.Errorf("--signoz-internal-url (or SIGNOZ_INTERNAL_URL) is required when --mcp-url is set")
 	}
 
+	ctx := context.Background()
 	client := signoz.NewClient(*signozURL, *apiKey)
-	agent := &rca.Agent{
-		Gate:     &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
-		Reasoner: rca.StubReasoner{},
+
+	// Ground the incident in the deterministic SLO facts (state, burn rate,
+	// error budget, telemetry trust) computed by the SLO engine and
+	// completeness gate, exactly the way `slo` does, before the RCA agent
+	// ever runs - the RCA agent and its reasoner only ever read Grounding,
+	// never compute it (PRD section 7, section 13).
+	grounding, sloName, err := evaluateGrounding(ctx, client, *sloConfigPath, *service, *environment)
+	if err != nil {
+		return err
 	}
 
-	ctx := context.Background()
+	agent := &rca.Agent{
+		Gate:     &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
+		Notifier: notify.NewFake(),
+	}
+
+	var toolCaller rca.MCPToolCaller
+	var toolSchemas []rca.ToolSchema
 	if *mcpURL != "" {
 		mcpClient := mcp.NewClient(*mcpURL, *apiKey, *signozInternalURL, nil)
 		if err := mcpClient.Initialize(ctx); err != nil {
 			return fmt.Errorf("connect to SigNoz MCP server: %w", err)
 		}
-		agent.EvidenceSource = &rca.MCPEvidenceSource{Client: mcpClient}
+		agent.EvidenceSource = &rca.MCPEvidenceSource{Client: mcpClient, PublicSignozURL: *signozURL}
+		toolCaller = mcpClient
+		if tools, err := mcpClient.ListTools(ctx); err != nil {
+			slog.Warn("diagnose: list MCP tools failed; the reasoner will not have live tool access", "error", err)
+		} else {
+			toolSchemas = rca.ToolSchemasFromMCPTools(tools)
+		}
 	}
 
-	// TODO(M2+): once the alert webhook and SLO engine are wired to this
-	// CLI, CorrelationID, SLO, Alert, and Grounding should be populated from
-	// the firing alert instead of left at their zero values here.
+	// Preflight the real LLM reasoner: fail clearly here if the OpenRouter
+	// API key is missing rather than silently falling back to a stub and
+	// producing a diagnosis nobody should trust.
+	reasoner, err := rca.NewLLMReasonerFromEnv(toolCaller, toolSchemas)
+	if err != nil {
+		return err
+	}
+	agent.Reasoner = reasoner
+
 	incident := rca.Incident{
-		Service:     *service,
-		Environment: *environment,
-		Window:      *window,
+		CorrelationID: fmt.Sprintf("diagnose-%s-%s-%d", *service, *environment, time.Now().UnixNano()),
+		Service:       *service,
+		Environment:   *environment,
+		Window:        *window,
+		SLO:           sloName,
+		Grounding:     grounding,
 	}
 
 	diagnosis, err := agent.Diagnose(ctx, incident)
 	if err != nil {
 		return err
 	}
+	logNotifierDelivery(agent.Notifier.(*notify.Fake))
+
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(diagnosis)
+}
+
+// evaluateGrounding evaluates the SLO config at configPath and maps the
+// report for the SLO scoped to service/environment into a notify.Grounding
+// via rca.GroundingFromReport, along with the SLO's name. If the config's
+// service/environment do not match the incident being diagnosed, grounding
+// is skipped (a zero-value Grounding is returned, matching the
+// already-conservative telemetryTrusted=false default) with a warning
+// logged, rather than silently attaching facts about the wrong service.
+func evaluateGrounding(ctx context.Context, client *signoz.Client, configPath, service, environment string) (notify.Grounding, string, error) {
+	cfg, err := slo.LoadConfig(configPath)
+	if err != nil {
+		return notify.Grounding{}, "", fmt.Errorf("load SLO config for grounding: %w", err)
+	}
+	if cfg.Service != service || cfg.Environment != environment {
+		slog.Warn("diagnose: SLO config service/environment does not match the incident; diagnosing without grounding",
+			"slo_config_service", cfg.Service, "slo_config_environment", cfg.Environment,
+			"service", service, "environment", environment)
+		return notify.Grounding{}, "", nil
+	}
+
+	gate := slo.NewMetricPresenceGate(client, nil)
+	engine := slo.NewEngine(client, gate)
+	reports, err := engine.Evaluate(ctx, cfg, time.Now())
+	if err != nil {
+		return notify.Grounding{}, "", fmt.Errorf("evaluate SLO for grounding: %w", err)
+	}
+	report, ok := rca.SelectReport(reports, "")
+	if !ok {
+		return notify.Grounding{}, "", nil
+	}
+	return rca.GroundingFromReport(environment, report), report.Name, nil
+}
+
+// logNotifierDelivery logs what the (fake, for now) notifier received, so
+// a live run can confirm delivery actually happened. The real Slack
+// adapter (Track D) replaces notify.NewFake() with a real Notifier
+// without any other change to runDiagnose.
+func logNotifierDelivery(fake *notify.Fake) {
+	if d, ok := fake.LastDiagnosis(); ok {
+		slog.Info("notifier: delivered diagnosis", "correlationId", d.CorrelationID, "service", d.Service, "status", d.Status)
+		return
+	}
+	if r, ok := fake.LastIndeterminate(); ok {
+		slog.Info("notifier: delivered indeterminate notice", "correlationId", r.CorrelationID, "service", r.Service, "reason", r.Reason)
+	}
 }
 
 func runServer(args []string) {

@@ -3,6 +3,8 @@ package rca
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/evidence"
@@ -27,6 +29,13 @@ type Agent struct {
 	// the seam MCPEvidenceSource (evidence_mcp.go) plugs into. When nil (the
 	// default), M1 behavior is unchanged.
 	EvidenceSource EvidenceSource
+	// Notifier, when set, delivers every diagnosis this Agent produces -
+	// diagnosed or indeterminate - to on-call (PRD section 14) after
+	// Diagnose finishes rendering it. Optional: nil (the default) delivers
+	// nothing, which keeps M1/M3 callers and tests unaffected. A delivery
+	// failure is logged, not returned - a Notifier outage must not make
+	// Diagnose itself fail; the diagnosis was still produced correctly.
+	Notifier notify.Notifier
 	// Now returns the current time; overridable in tests. Defaults to
 	// time.Now.
 	Now func() time.Time
@@ -53,7 +62,9 @@ func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, e
 		return notify.Diagnosis{}, err
 	}
 	if !result.Sufficient {
-		return a.indeterminate(inc, result), nil
+		diagnosis := a.indeterminate(inc, result)
+		a.deliver(ctx, diagnosis)
+		return diagnosis, nil
 	}
 
 	ev, err := a.gatherEvidence(ctx, inc, snapshot)
@@ -64,7 +75,37 @@ func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, e
 	if err != nil {
 		return notify.Diagnosis{}, fmt.Errorf("rca: reason: %w", err)
 	}
-	return Render(inc, ev, md), nil
+	diagnosis := Render(inc, ev, md)
+	a.deliver(ctx, diagnosis)
+	return diagnosis, nil
+}
+
+// deliver sends d to a.Notifier, dispatching to NotifyIndeterminate or
+// NotifyDiagnosis based on d.Status. A no-op when a.Notifier is nil. Any
+// delivery error is logged with d's CorrelationID (PRD section 20) rather
+// than propagated: the diagnosis itself already succeeded, and a chat/voice
+// adapter being unreachable is not a reason to fail the diagnose call.
+func (a *Agent) deliver(ctx context.Context, d notify.Diagnosis) {
+	if a.Notifier == nil {
+		return
+	}
+	var err error
+	if d.Status == notify.StatusIndeterminate {
+		err = a.Notifier.NotifyIndeterminate(ctx, notify.IndeterminateReason{
+			CorrelationID: d.CorrelationID,
+			Service:       d.Service,
+			Environment:   d.Environment,
+			Window:        d.Window,
+			Grounding:     d.Grounding,
+			Reason:        strings.Join(d.MissingEvidence, "; "),
+			Timestamp:     d.Timestamp,
+		})
+	} else {
+		err = a.Notifier.NotifyDiagnosis(ctx, d)
+	}
+	if err != nil {
+		slog.Error("rca: notifier delivery failed", "correlationId", d.CorrelationID, "status", d.Status, "error", err)
+	}
 }
 
 // checkGate fetches the gate result exactly once per Diagnose call. If the

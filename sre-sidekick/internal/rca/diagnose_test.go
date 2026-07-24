@@ -9,6 +9,74 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
 )
 
+func TestAgent_Diagnose_DeliversDiagnosedResultToNotifier(t *testing.T) {
+	snapshot := evidence.Snapshot{
+		Traces: []evidence.Record{{Selector: "POST /checkout", Fields: map[string]any{"status_code": float64(500)}}},
+	}
+	fake := notify.NewFake()
+	agent := &Agent{
+		Gate:     &SourceEvidenceGate{Source: source.MemorySource{Data: snapshot}},
+		Reasoner: StubReasoner{},
+		Notifier: fake,
+	}
+	inc := Incident{CorrelationID: "corr-3", Service: "checkout", Environment: "prod", Window: "1h"}
+
+	got, err := agent.Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	last, ok := fake.LastDiagnosis()
+	if !ok {
+		t.Fatal("expected the Notifier to receive a diagnosis, got none")
+	}
+	if last.CorrelationID != got.CorrelationID || last.RootCause != got.RootCause {
+		t.Errorf("Notifier received %+v, want it to match the returned diagnosis %+v", last, got)
+	}
+	if len(fake.Indeterminates) != 0 {
+		t.Errorf("expected no indeterminate notifications on the diagnosed path, got %+v", fake.Indeterminates)
+	}
+}
+
+func TestAgent_Diagnose_DeliversIndeterminateResultToNotifier(t *testing.T) {
+	fake := notify.NewFake()
+	agent := &Agent{
+		Gate:     &SourceEvidenceGate{Source: source.MemorySource{Data: evidence.Snapshot{}}},
+		Reasoner: failingReasoner{t: t},
+		Notifier: fake,
+	}
+	inc := Incident{CorrelationID: "corr-4", Service: "checkout", Environment: "prod", Window: "1h"}
+
+	got, err := agent.Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+	if got.Status != notify.StatusIndeterminate {
+		t.Fatalf("Status = %v, want %v", got.Status, notify.StatusIndeterminate)
+	}
+
+	last, ok := fake.LastIndeterminate()
+	if !ok {
+		t.Fatal("expected the Notifier to receive NotifyIndeterminate, got none")
+	}
+	if last.CorrelationID != got.CorrelationID {
+		t.Errorf("Notifier received CorrelationID %q, want %q", last.CorrelationID, got.CorrelationID)
+	}
+	if len(fake.Diagnoses) != 0 {
+		t.Errorf("expected no NotifyDiagnosis calls on the indeterminate path, got %+v", fake.Diagnoses)
+	}
+}
+
+func TestAgent_Diagnose_NilNotifierIsANoOp(t *testing.T) {
+	agent := &Agent{
+		Gate:     &SourceEvidenceGate{Source: source.MemorySource{Data: evidence.Snapshot{}}},
+		Reasoner: failingReasoner{t: t},
+	}
+	if _, err := agent.Diagnose(context.Background(), Incident{Service: "s", Window: "1h"}); err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+}
+
 // failingReasoner fails the test if it is ever called. Used to prove the
 // Agent does not invoke the reasoner on the indeterminate path.
 type failingReasoner struct{ t *testing.T }
