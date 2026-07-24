@@ -221,10 +221,12 @@ func newTelemetry(ctx context.Context, cfg config) (*telemetry, error) {
 		tracerProvider: tracerProvider,
 		meterProvider:  meterProvider,
 		runner: &runner{
-			tracer:    tracerProvider.Tracer("sre-sidekick/demo-agent"),
-			evaluated: evaluated,
-			grounded:  grounded,
-			logs:      logs,
+			tracer:      tracerProvider.Tracer("sre-sidekick/demo-agent"),
+			evaluated:   evaluated,
+			grounded:    grounded,
+			logs:        logs,
+			service:     cfg.service,
+			environment: cfg.environment,
 		},
 	}, nil
 }

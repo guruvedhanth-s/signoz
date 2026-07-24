@@ -41,6 +41,12 @@ type runner struct {
 	evaluated metric.Int64Counter
 	grounded  metric.Int64Counter
 	logs      logSink
+	// service and environment are attached as metric datapoint attributes
+	// (service_name / environment) so the SLO engine's PromQL label matchers
+	// can scope to them. OTel resource attributes alone are not exposed as
+	// PromQL labels by SigNoz, so the SLI queries would match nothing.
+	service     string
+	environment string
 }
 
 // execute runs one simulated agent run according to plan. It returns an
@@ -96,9 +102,13 @@ func (r *runner) execute(ctx context.Context, plan RunPlan) error {
 	}
 	root.End(trace.WithTimestamp(evalEnd))
 
-	r.evaluated.Add(ctx, 1)
+	sliAttrs := metric.WithAttributes(
+		attribute.String("service_name", r.service),
+		attribute.String("environment", r.environment),
+	)
+	r.evaluated.Add(ctx, 1, sliAttrs)
 	if plan.Grounded {
-		r.grounded.Add(ctx, 1)
+		r.grounded.Add(ctx, 1, sliAttrs)
 	}
 
 	spanContext := root.SpanContext()
