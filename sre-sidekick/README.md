@@ -79,7 +79,7 @@ Profiles are YAML telemetry contracts. Examples are available in:
 
 - `examples/checkout-api.yaml`
 - `examples/support-agent.yaml`
-- `examples/log-demo-backend.yaml`
+- `examples/demo-agent.yaml`
 
 A profile declares the service, environment, source, expected fields, and
 service-specific rules:
@@ -89,9 +89,9 @@ apiVersion: reliability/v1
 kind: TelemetryProfile
 
 metadata:
-  name: log-demo-backend
-  service: log-demo-backend
-  environment: demo
+  name: demo-agent
+  service: support-agent
+  environment: local
 
 spec:
   data_kind: backend
@@ -186,111 +186,88 @@ export SIGNOZ_API_KEY='YOUR_SERVICE_ACCOUNT_KEY'
 
 Do not commit the API key.
 
-## Verified live logs demo
+## Demo agent: a live, controllable support-agent workload
 
-The repository includes a standalone backend used to demonstrate Track A. The
-backend always remains application-healthy, but its fault endpoint deliberately
-emits malformed logs without a trace ID.
+The repository includes `cmd/demo-agent`, a small program that emits
+realistic OpenTelemetry traces, metrics, and logs for a simulated AI support
+agent.
+It targets `service.name=support-agent`, `deployment.environment=local` by
+default, matching `examples/support-agent.yaml` and
+`examples/support-agent-slo.yaml`.
+It exists so the rest of SRE Sidekick (Track A audit, Track B SLO, and the
+RCA agent) has something real to reason about, in either a healthy or a
+deliberately broken state.
 
-### 1. Start the demo backend
+Each loop iteration simulates one agent run and emits:
+
+- a trace: `agent.run` with three children, `model.chat`, `tool.search_kb`,
+  and `evaluation.groundedness`;
+- two counters: `agent_evaluated_answers_total` (every run) and
+  `agent_grounded_answers_total` (only grounded, successful runs);
+- one log record correlated to that run's trace ID.
+
+### 1. Start the demo agent in healthy mode
 
 ```bash
-go run ./cmd/log-demo-backend
+go run ./cmd/demo-agent
 ```
 
 Defaults:
 
-- application URL: `http://localhost:8090`;
-- OTLP logs endpoint: `http://localhost:4318/v1/logs`;
-- `service.name`: `log-demo-backend`;
-- environment: `demo`;
-- log heartbeat: every two seconds.
+- OTLP/HTTP endpoint: `http://localhost:4318` (env `OTLP_ENDPOINT`);
+- `service.name`: `support-agent`;
+- `deployment.environment`: `local`;
+- interval between runs: `2s`;
+- mode: healthy (`--buggy` not set).
 
-Verify application health:
+In healthy mode, every run succeeds: `tool.search_kb` returns quickly with an
+Ok status, `evaluation.grounded` is `true`, and both counters increment.
+Over time the grounded-answer SLI in `examples/support-agent-slo.yaml` stays
+healthy.
 
-```bash
-curl -fsS http://localhost:8090/healthz | python3 -m json.tool
-```
+### 2. Start automatic Track A auditing or Track B SLO evaluation
 
-Expected:
-
-```json
-{
-  "application_healthy": true,
-  "status": "ok",
-  "telemetry_mode": "healthy"
-}
-```
-
-### 2. Start automatic Track A auditing
-
-In another terminal:
+In another terminal, watch the correlated logs:
 
 ```bash
 go run ./cmd/reliability-agent audit-watch \
-  --profile examples/log-demo-backend.yaml \
+  --profile examples/demo-agent.yaml \
   --interval 2s \
   --lookback 15s
 ```
 
-The watcher:
-
-1. queries recent logs through SigNoz `/api/v5/query_range`;
-2. normalizes the response into Track A evidence;
-3. applies the profile's log rules;
-4. prints an audit report every cycle;
-5. opens one alert after two consecutive blocker failures;
-6. suppresses duplicate alerts;
-7. emits one recovery event after the audit recovers.
-
-Warnings remain visible but do not page by default. The alert policy can be
-changed with:
-
-```text
---alert-severity warning
---failures-before-alert 1
-```
-
-### 3. Inject unhealthy telemetry
+Or evaluate the grounded-answers SLO directly:
 
 ```bash
-curl -fsS -X POST http://localhost:8090/demo/unhealthy \
-  | python3 -m json.tool
+go run ./cmd/reliability-agent slo \
+  --config examples/support-agent-slo.yaml \
+  --output json
 ```
 
-This changes only telemetry emission. `/healthz` continues returning 200 while
-new logs omit `trace_id`.
+### 3. Switch to buggy mode
 
-After two failed audits, the watcher emits one event similar to:
-
-```json
-{
-  "kind": "track_a_alert",
-  "state": "firing",
-  "service": "log-demo-backend",
-  "current_status": "fail",
-  "message": "telemetry quality audit failed"
-}
-```
-
-The `log-trace-correlation` finding contains the number of affected records.
-Repeated failed audits do not emit duplicate firing events.
-
-### 4. Recover telemetry
+Stop the healthy process and restart it with `--buggy`:
 
 ```bash
-curl -fsS -X POST http://localhost:8090/demo/healthy \
-  | python3 -m json.tool
+go run ./cmd/demo-agent --buggy
 ```
 
-Malformed logs must leave the configured lookback window before the audit can
-pass:
+In buggy mode, `tool.search_kb` times out on every run by default: the span
+gets an `Error` status and a `TimeoutError` exception event (`exception.type`,
+`exception.message`, `exception.stacktrace`), the run is not grounded, and
+an `ERROR` log correlated to the run's trace ID is emitted.
+`agent_evaluated_answers_total` keeps incrementing but
+`agent_grounded_answers_total` does not, so the grounded-answer SLI (and its
+error budget) starts burning.
+This is exactly the failure the RCA agent is meant to diagnose from the
+trace: an `agent.run` with a failing `tool.search_kb` child span carrying a
+planted `TimeoutError`.
 
-```bash
-sleep 20
-```
-
-The watcher then emits one event with `"state":"resolved"`.
+Use `--error-rate` to simulate partial failure instead of a hard outage, for
+example `--buggy --error-rate 0.3` fails roughly 30% of runs while the rest
+stay healthy.
+Use `--runs` to cap the number of simulated runs instead of running until
+interrupted, and `--interval` to control how often runs happen.
 
 ### Webhook delivery
 
@@ -298,7 +275,7 @@ Console alerts can also be delivered to an HTTP endpoint:
 
 ```bash
 go run ./cmd/reliability-agent audit-watch \
-  --profile examples/log-demo-backend.yaml \
+  --profile examples/demo-agent.yaml \
   --interval 2s \
   --lookback 15s \
   --webhook-url http://localhost:9000/alerts
@@ -390,7 +367,8 @@ Convenience targets:
 
 ```bash
 make run
-make run-log-demo
+make run-demo-agent
+make run-demo-agent-buggy
 make watch-logs
 ```
 
@@ -398,7 +376,7 @@ make watch-logs
 
 ```text
 cmd/reliability-agent       Main server, audit-watch, and SLO CLI
-cmd/log-demo-backend        Always-healthy OTLP logs demo service
+cmd/demo-agent              Traces+metrics+logs demo workload for support-agent
 examples                    Telemetry profiles and SLO configurations
 internal/profile            Profile model and validation
 internal/evidence           Source-neutral telemetry snapshot

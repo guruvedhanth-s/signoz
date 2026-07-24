@@ -150,7 +150,7 @@ func TestCompleteAuditWatchFiringAndRecoveryFlow(t *testing.T) {
 	reports := make(chan audit.Report, 32)
 	runnerErrors := make(chan error, 8)
 	runner := &monitor.Runner{
-		Profile:             loadProfile(t, "log-demo-backend.yaml"),
+		Profile:             loadProfile(t, "demo-agent.yaml"),
 		Source:              signoz.NewLogSource(signoz.NewClient(signozServer.URL, "signoz-key"), 10),
 		Audit:               audit.Engine{},
 		Sink:                alerting.WebhookSink{URL: webhook.URL},

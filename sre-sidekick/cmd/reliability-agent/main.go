@@ -51,7 +51,7 @@ func main() {
 
 func runAuditWatch(args []string) error {
 	fs := flag.NewFlagSet("audit-watch", flag.ContinueOnError)
-	profilePath := fs.String("profile", "examples/log-demo-backend.yaml", "telemetry profile YAML path")
+	profilePath := fs.String("profile", "examples/demo-agent.yaml", "telemetry profile YAML path")
 	signozURL := fs.String("signoz-url", os.Getenv("SIGNOZ_URL"), "SigNoz base URL")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
 	interval := fs.Duration("interval", 2*time.Second, "audit interval")
