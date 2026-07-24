@@ -219,7 +219,7 @@ flowchart TD
     subgraph sidekick["SRE Sidekick - third-layer Go service"]
         AUD["Telemetry auditor"]
         SLO["SLO engine"]
-        RCA["RCA agent - Google ADK Go"]
+        RCA["RCA agent - MCP + DeepSeek loop"]
         NOTIFY["Chat and voice adapters"]
         ACT["Action adapters - human-approved"]
         AUD --> SLO
@@ -431,9 +431,9 @@ Detection is deterministic; no LLM decides that an incident exists.
 
 1. Check the RCA evidence gate (section 11.4). If the RCA evidence is insufficient (no error spans, exceptions, or correlated logs for the service and window), return an `indeterminate` diagnosis that names what is missing. Do not proceed to reasoning. This is separate from the SLO completeness gate; complete SLO metrics do not imply the traces needed to explain a failure exist.
 2. Otherwise, gather bounded evidence via MCP tools: error spans, top exceptions, latency distribution shift, correlated logs, recent deploys or version changes.
-3. The RCA agent is a Google ADK Go agent. ADK orchestrates the reasoning loop and calls the SigNoz MCP tools natively; the DeepSeek model (via an OpenAI-compatible OpenRouter client) produces the root cause and a recommended advisory action.
+3. The RCA agent runs a lean in-house agentic tool-calling loop: an OpenAI-compatible OpenRouter client drives the DeepSeek model, exposing the SigNoz MCP tools as function-calling tools and looping on tool calls (bounded) to gather evidence and produce the root cause and a recommended advisory action. Google ADK Go was evaluated but its model layer (v1.5.x) is hard-wired to Gemini's `genai` types and cannot drive an OpenAI-compatible OpenRouter/DeepSeek model without a bespoke adapter; the lean loop is simpler and robust, and is isolated behind a `Reasoner` interface so it could be swapped later.
 4. The model only reasons over the retrieved evidence; it must cite the evidence it used and must not invent metrics or services.
-5. Rule-based presentation (section 13.4) decides whether the result is a conclusion, ranked hypotheses, or `indeterminate`. ADK produces the reasoning; the deterministic rule set governs how it is presented.
+5. Rule-based presentation (section 13.4) decides whether the result is a conclusion, ranked hypotheses, or `indeterminate`. The LLM loop produces the reasoning and phrasing; the deterministic rule set governs how it is presented.
 
 ### 13.3 Diagnosis contract
 
@@ -576,8 +576,8 @@ sre-sidekick/
   cmd/agent/            CLI + long-running modes: audit, slo, generate, watch, ask
   internal/audit/       check registry + deterministic score (Track A)
   internal/slo/         config, SLI evaluators, budget/burn, state machine, generator (Track B, built)
-  internal/rca/         Google ADK Go agent; SigNoz MCP tools + diagnosis contract (Track C)
-  internal/llm/         OpenAI-compatible OpenRouter (DeepSeek) client, supplied to ADK; deterministic core never imports it
+  internal/rca/         RCA agent: MCP evidence, DeepSeek reasoner loop, presentation rules, diagnosis contract (Track C)
+  internal/mcp/         SigNoz MCP client (evidence tools); deterministic core never imports it
   internal/notify/      Notifier interface; Slack adapter (Telegram, voice = stretch) (Track D)
   internal/act/         Actuator interface; advisory adapter (keda, patch/pr = stretch) (Track D)
   internal/signoz/      REST + MCP client (SIGNOZ-API-KEY), query_range, fields, traces, logs, dashboards, rules
@@ -660,7 +660,7 @@ hackathon/DEMO.md             runbook
 7a. Demo windows are short (for example 1h SLO with a 5m short window) so the SLI, burn rate, and recovery move within the session; production would use 30d.
 7b. External dependencies (OpenRouter, Slack, demo-agent) have no fallback by design. A startup preflight checks each and warns loudly if one is missing.
 7c. Build order: land the thin end-to-end path first (alert -> ground -> evidence-gate -> one MCP evidence query -> DeepSeek -> one Slack post), then add breadth (more presentation rules, the slash command, richer Block Kit). This protects the demo if time runs short.
-8. The agentic layer (Track C, RCA) is built with Google ADK Go (`google.golang.org/adk/v2`, ADK 2.0). ADK is code-first Go, so the full-Go constraint holds. ADK consumes the SigNoz MCP server as native tools for evidence gathering, and the DeepSeek model is provided to ADK through an OpenAI-compatible OpenRouter client. The deterministic engine does not import ADK.
+8. The agentic layer (Track C, RCA) is a lean in-house tool-calling loop in Go, keeping the full-Go constraint. It consumes the SigNoz MCP server as function-calling tools for evidence gathering, with the DeepSeek model driven through an OpenAI-compatible OpenRouter client. Google ADK Go was evaluated and rejected for the reasoner because v1.5.x's model layer is bound to Gemini's `genai` types and cannot drive OpenRouter/DeepSeek without a custom adapter; the loop is isolated behind a `Reasoner` interface, so it can be swapped for ADK (or another framework) without touching the rest. The deterministic engine does not import the RCA layer.
 
 Everything below reflects these decisions.
 
@@ -692,7 +692,7 @@ A preflight runs first and warns loudly if any dependency is missing (there is n
 5. Error rate rises -> the short-window burn-rate alert fires -> SigNoz webhooks the sidekick.
 6. The sidekick grounds on the SLO (unhealthy, burn well above 14.4x), passes the RCA
    evidence gate, pulls the failing trace tree and exception logs via MCP, runs the
-   DeepSeek ADK agent, and posts a Slack message: root cause (tool.search_kb timeout
+   DeepSeek RCA loop, and posts a Slack message: root cause (tool.search_kb timeout
    after the buggy change) with SigNoz evidence links and a recommended advisory action.
    Then it stops for human review.
 7. The human reverts demo-agent to healthy. The short-window burn rate falls within
@@ -726,7 +726,7 @@ A preflight runs first and warns loudly if any dependency is missing (there is n
 | Autonomous action goes wrong | No action without human approval; reversible-first; scoped, logged adapters. |
 | Scope too big for the hackathon | MVP is the thinnest full loop on one scenario; every stage beyond it is a pluggable adapter marked stretch. |
 | Token cost / latency of MCP + LLM | Bounded evidence, single-pass reasoning, deterministic engine carries the load; MCP only for RCA. |
-| Google ADK Go 2.0 is new (recent GA) | ADK is isolated to `internal/rca`; the diagnosis contract is stable, so ADK could be swapped for a plain MCP + LLM loop without touching the rest. |
+| RCA framework churn | The reasoner is isolated behind the `Reasoner` interface in `internal/rca`; the diagnosis contract is stable, so the lean MCP + DeepSeek loop could be swapped for Google ADK Go (once it supports OpenAI-compatible models) or another framework without touching the rest. |
 | Two PRDs / drift | This document is the single PRD; the earlier third-layer draft is folded in here. |
 
 ---
