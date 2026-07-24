@@ -1,0 +1,154 @@
+package rca
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/evidence"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
+)
+
+// maxEvidenceItems caps how many evidence records the Agent attaches to a
+// single diagnosis, so a noisy window does not produce an unusably long
+// message.
+const maxEvidenceItems = 10
+
+// Agent wires the evidence gate and reasoner together into the RCA
+// pipeline: check the gate first, call the reasoner only if the gate finds
+// enough signal, then render a notify.Diagnosis with deterministic fields
+// injected around the reasoner's free text.
+type Agent struct {
+	Gate     EvidenceGate
+	Reasoner Reasoner
+	// Now returns the current time; overridable in tests. Defaults to
+	// time.Now.
+	Now func() time.Time
+}
+
+func (a *Agent) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}
+
+// Diagnose runs the RCA pipeline for one incident:
+//  1. Check the evidence gate. If it finds insufficient evidence, return an
+//     indeterminate diagnosis without ever calling the reasoner - the
+//     reasoner must not be asked to explain an incident it has nothing to
+//     go on for.
+//  2. Otherwise gather evidence from the same snapshot the gate fetched
+//     (fetched exactly once per call, see checkGate), call the reasoner,
+//     and render the final notify.Diagnosis.
+func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, error) {
+	result, snapshot, err := a.checkGate(ctx, inc)
+	if err != nil {
+		return notify.Diagnosis{}, err
+	}
+	if !result.Sufficient {
+		return a.indeterminate(inc, result), nil
+	}
+
+	ev := gatherEvidence(inc, snapshot)
+	md, err := a.Reasoner.Reason(ctx, inc, ev)
+	if err != nil {
+		return notify.Diagnosis{}, fmt.Errorf("rca: reason: %w", err)
+	}
+	return Render(inc, ev, md), nil
+}
+
+// checkGate fetches the gate result exactly once per Diagnose call. If the
+// configured gate also exposes the snapshot it fetched (SnapshotProvider,
+// as SourceEvidenceGate does), that snapshot is reused for evidence
+// gathering instead of querying the telemetry source a second time. Gates
+// that only implement the base EvidenceGate interface (e.g. simple test
+// fakes) still work, just with no snapshot to gather evidence from.
+func (a *Agent) checkGate(ctx context.Context, inc Incident) (EvidenceResult, evidence.Snapshot, error) {
+	if provider, ok := a.Gate.(SnapshotProvider); ok {
+		return provider.CheckWithSnapshot(ctx, inc)
+	}
+	result, err := a.Gate.Check(ctx, inc)
+	return result, evidence.Snapshot{}, err
+}
+
+func (a *Agent) indeterminate(inc Incident, result EvidenceResult) notify.Diagnosis {
+	return notify.Diagnosis{
+		CorrelationID:   inc.CorrelationID,
+		Service:         inc.Service,
+		Environment:     inc.Environment,
+		Window:          inc.Window,
+		Status:          notify.StatusIndeterminate,
+		Grounding:       inc.Grounding,
+		MissingEvidence: missingEvidence(result),
+		Timestamp:       a.now(),
+	}
+}
+
+// missingEvidence names what the gate found missing, for
+// notify.Diagnosis.MissingEvidence.
+func missingEvidence(result EvidenceResult) []string {
+	var missing []string
+	if !result.HasErrorSpans {
+		missing = append(missing, "error spans")
+	}
+	if !result.HasExceptions {
+		missing = append(missing, "exceptions")
+	}
+	if !result.HasLogs {
+		missing = append(missing, "logs")
+	}
+	if result.Reason != "" {
+		missing = append(missing, result.Reason)
+	}
+	return missing
+}
+
+// gatherEvidence turns a snapshot into the notify.Evidence list a
+// diagnosis can cite. Evidence ids ("e1", "e2", ...) are only stable
+// within one Diagnose call - Render only needs ids that resolve within the
+// same diagnosis, not across calls.
+//
+// SignozLink is a placeholder built from the incident's
+// service/environment/window, not a real deep link to the query or record
+// that produced each piece of evidence: building a precise deep link
+// requires the SigNoz MCP server (a later milestone) which knows how to
+// construct a link to the exact query. Documented here so it is not
+// mistaken for a precise link.
+func gatherEvidence(inc Incident, snapshot evidence.Snapshot) []notify.Evidence {
+	var out []notify.Evidence
+	add := func(kind notify.EvidenceKind, records []evidence.Record) {
+		for _, r := range records {
+			if len(out) >= maxEvidenceItems {
+				return
+			}
+			out = append(out, notify.Evidence{
+				ID:         fmt.Sprintf("e%d", len(out)+1),
+				Kind:       kind,
+				SignozLink: placeholderLink(inc),
+				Note:       evidenceNote(kind, r),
+			})
+		}
+	}
+	add(notify.EvidenceKindTrace, snapshot.Traces)
+	add(notify.EvidenceKindLog, snapshot.Logs)
+	add(notify.EvidenceKindMetric, snapshot.Metrics)
+	return out
+}
+
+func evidenceNote(kind notify.EvidenceKind, r evidence.Record) string {
+	if r.Selector != "" {
+		return fmt.Sprintf("%s: %s", kind, r.Selector)
+	}
+	return string(kind)
+}
+
+// placeholderLink builds a best-effort SigNoz link scoped to the
+// incident's service, environment, and window. It does not point at the
+// exact query or record behind a piece of evidence - that requires the
+// SigNoz MCP integration (a later milestone) which can construct a deep
+// link per query. Left as a placeholder here so nobody mistakes it for a
+// precise deep link.
+func placeholderLink(inc Incident) string {
+	return fmt.Sprintf("signoz://services/%s?environment=%s&window=%s", inc.Service, inc.Environment, inc.Window)
+}

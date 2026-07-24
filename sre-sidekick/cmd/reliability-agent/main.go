@@ -21,6 +21,7 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/monitor"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/otlp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/profile"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/registry"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/slo"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source/signoz"
@@ -36,6 +37,8 @@ func main() {
 			err = runGenerate(os.Args[2:])
 		case "audit-watch":
 			err = runAuditWatch(os.Args[2:])
+		case "diagnose":
+			err = runDiagnose(os.Args[2:])
 		default:
 			runServer(os.Args[1:])
 			return
@@ -130,6 +133,48 @@ func runAuditWatch(args []string) error {
 		"failures_before_alert", *failuresBeforeAlert,
 		"signoz_url", *signozURL)
 	return runner.Run(ctx)
+}
+
+func runDiagnose(args []string) error {
+	fs := flag.NewFlagSet("diagnose", flag.ContinueOnError)
+	service := fs.String("service", "", "service name to diagnose")
+	environment := fs.String("environment", "", "deployment environment (e.g. prod, staging)")
+	window := fs.String("window", "1h", "lookback window for evidence gathering (e.g. 1h, 30m, 7d)")
+	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
+	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
+	limit := fs.Int("limit", 200, "maximum records per signal query")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+	if *service == "" {
+		return fmt.Errorf("--service is required")
+	}
+
+	client := signoz.NewClient(*signozURL, *apiKey)
+	agent := &rca.Agent{
+		Gate:     &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
+		Reasoner: rca.StubReasoner{},
+	}
+
+	// TODO(M2+): once the alert webhook and SLO engine are wired to this
+	// CLI, CorrelationID, SLO, Alert, and Grounding should be populated from
+	// the firing alert instead of left at their zero values here.
+	incident := rca.Incident{
+		Service:     *service,
+		Environment: *environment,
+		Window:      *window,
+	}
+
+	diagnosis, err := agent.Diagnose(context.Background(), incident)
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(diagnosis)
 }
 
 func runServer(args []string) {
