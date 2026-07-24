@@ -148,6 +148,7 @@ func runDiagnose(args []string) error {
 	mcpURL := fs.String("mcp-url", os.Getenv("SIGNOZ_MCP_URL"), "SigNoz MCP server URL; when set, evidence is gathered live via MCP tools instead of the M1 telemetry-source placeholder")
 	signozInternalURL := fs.String("signoz-internal-url", os.Getenv("SIGNOZ_INTERNAL_URL"), "SigNoz URL the MCP server should use to reach SigNoz (sent as the X-SigNoz-URL header); required when --mcp-url is set")
 	sloConfigPath := fs.String("slo-config", "examples/support-agent-slo.yaml", "SLO YAML path used to ground this diagnosis's grounding facts (SLO state, burn rate, error budget, telemetry trust)")
+	presentationConfigPath := fs.String("config", envOr("SIDEKICK_CONFIG", "sidekick.yaml"), "presentation rule config YAML path (PRD 13.4: min error samples, concentration/latency-shift/error-rate-delta thresholds, golden signals required for a conclusion); a missing file falls back to built-in defaults")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
@@ -174,9 +175,15 @@ func runDiagnose(args []string) error {
 		return err
 	}
 
+	presentationConfig, err := rca.LoadPresentationConfig(*presentationConfigPath)
+	if err != nil {
+		return err
+	}
+
 	agent := &rca.Agent{
-		Gate:     &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
-		Notifier: notify.NewFake(),
+		Gate:         &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
+		Notifier:     notify.NewFake(),
+		Presentation: presentationConfig,
 	}
 
 	var toolCaller rca.MCPToolCaller
@@ -187,6 +194,7 @@ func runDiagnose(args []string) error {
 			return fmt.Errorf("connect to SigNoz MCP server: %w", err)
 		}
 		agent.EvidenceSource = &rca.MCPEvidenceSource{Client: mcpClient, PublicSignozURL: *signozURL}
+		agent.SignalsCaller = mcpClient
 		toolCaller = mcpClient
 		if tools, err := mcpClient.ListTools(ctx); err != nil {
 			slog.Warn("diagnose: list MCP tools failed; the reasoner will not have live tool access", "error", err)

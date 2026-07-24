@@ -2,22 +2,28 @@ package rca
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/evidence"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mcp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
 )
 
 func TestAgent_Diagnose_DeliversDiagnosedResultToNotifier(t *testing.T) {
-	snapshot := evidence.Snapshot{
-		Traces: []evidence.Record{{Selector: "POST /checkout", Fields: map[string]any{"status_code": float64(500)}}},
-	}
+	// Presentation rules (PRD 13.4) require enough concentrated error
+	// evidence before a diagnosis counts as more than CouldNotDetermine -
+	// see TestAgent_Diagnose_Presentation_* below for the rule boundaries
+	// themselves. This test only cares about the delivery routing (a
+	// diagnosed - here, ranked-hypotheses - result goes to NotifyDiagnosis,
+	// never NotifyIndeterminate).
 	fake := notify.NewFake()
 	agent := &Agent{
-		Gate:     &SourceEvidenceGate{Source: source.MemorySource{Data: snapshot}},
-		Reasoner: StubReasoner{},
-		Notifier: fake,
+		Gate:           &SourceEvidenceGate{Source: diagnosableGateSource()},
+		EvidenceSource: fakeEvidenceSource{ev: concentratedErrorEvidence(5)},
+		Reasoner:       StubReasoner{},
+		Notifier:       fake,
 	}
 	inc := Incident{CorrelationID: "corr-3", Service: "checkout", Environment: "prod", Window: "1h"}
 
@@ -122,18 +128,25 @@ func TestAgent_Diagnose_IndeterminateWhenEvidenceInsufficient(t *testing.T) {
 }
 
 func TestAgent_Diagnose_HappyPath(t *testing.T) {
-	snapshot := evidence.Snapshot{
-		AvailableSignals: map[string]bool{"traces": true, "logs": true},
-		Traces: []evidence.Record{
-			{Selector: "POST /checkout", Fields: map[string]any{"status_code": float64(500)}},
-		},
-		Logs: []evidence.Record{
-			{Selector: "app.log", Fields: map[string]any{"message": "payment gateway timeout"}},
+	// Concentrated evidence plus a latency-shift signal (see
+	// TestAgent_Diagnose_Presentation_Conclusion_WhenConcentratedAndLatencyShifted
+	// for the rule engine's reasoning) - enough for the presentation rules
+	// to reach a Conclusion, so this remains a true "happy path" through
+	// the whole pipeline including Decide/Present, not just Render.
+	latencyCaller := &recordingCaller{
+		fakeToolCaller: &fakeToolCaller{},
+		onCall: func(args map[string]any) mcp.ToolResult {
+			if args["error"] == true {
+				return scalarResult(5310000000)
+			}
+			return scalarResult(250000000)
 		},
 	}
 	agent := &Agent{
-		Gate:     &SourceEvidenceGate{Source: source.MemorySource{Data: snapshot}},
-		Reasoner: StubReasoner{},
+		Gate:           &SourceEvidenceGate{Source: diagnosableGateSource()},
+		EvidenceSource: fakeEvidenceSource{ev: concentratedErrorEvidence(5)},
+		Reasoner:       StubReasoner{},
+		SignalsCaller:  latencyCaller,
 	}
 	inc := Incident{
 		CorrelationID: "corr-2",
@@ -154,13 +167,204 @@ func TestAgent_Diagnose_HappyPath(t *testing.T) {
 		t.Errorf("Grounding = %+v, want %+v", got.Grounding, inc.Grounding)
 	}
 	if got.RootCause == "" {
-		t.Errorf("expected a root cause from the stub reasoner")
+		t.Errorf("expected a root cause: the rules found a dominant, corroborated cause")
 	}
-	if len(got.Evidence) != 2 {
-		t.Errorf("expected 2 evidence items attached (1 trace + 1 log), got %d: %+v", len(got.Evidence), got.Evidence)
+	if len(got.Evidence) != 5 {
+		t.Errorf("expected 5 evidence items attached, got %d: %+v", len(got.Evidence), got.Evidence)
 	}
 	if len(got.MissingEvidence) != 0 {
 		t.Errorf("MissingEvidence should be empty on the diagnosed path, got %v", got.MissingEvidence)
+	}
+}
+
+// canonicalReasoner returns a fixed ModelDiagnosis, ignoring the incident
+// and evidence it is given - used by the presentation wiring tests below,
+// which only care about how Agent.Diagnose *shapes* the reasoner's output,
+// not about reasoning itself.
+type canonicalReasoner struct {
+	md ModelDiagnosis
+}
+
+func (r canonicalReasoner) Reason(context.Context, Incident, []notify.Evidence) (ModelDiagnosis, error) {
+	return r.md, nil
+}
+
+// fakeEvidenceSource returns a fixed evidence list, standing in for
+// MCPEvidenceSource in the presentation wiring tests below.
+type fakeEvidenceSource struct {
+	ev []notify.Evidence
+}
+
+func (f fakeEvidenceSource) Gather(context.Context, Incident) ([]notify.Evidence, error) {
+	return f.ev, nil
+}
+
+// concentratedErrorEvidence builds evidence shaped like the live
+// support-agent demo: every error shares the same operation and a
+// classifiable TimeoutError signature.
+func concentratedErrorEvidence(n int) []notify.Evidence {
+	ev := make([]notify.Evidence, 0, n)
+	for i := 0; i < n; i++ {
+		ev = append(ev, notify.Evidence{
+			ID:   fmt.Sprintf("e%d", i+1),
+			Kind: notify.EvidenceKindTrace,
+			Note: "operation tool.search_kb, errored: tool.search_kb timed out after 5s, duration=5s",
+		})
+	}
+	return ev
+}
+
+// diagnosableGateSource is a telemetry-source snapshot with just enough
+// (one error trace) to make SourceEvidenceGate consider the incident
+// worth reasoning about at all - the presentation-rule tests below use a
+// separate, richer EvidenceSource for the evidence actually reasoned
+// over, exactly as MCPEvidenceSource does against a live SigNoz gate.
+func diagnosableGateSource() source.MemorySource {
+	return source.MemorySource{Data: evidence.Snapshot{
+		Traces: []evidence.Record{{Selector: "seed", Fields: map[string]any{"status_code": float64(500)}}},
+	}}
+}
+
+func TestAgent_Diagnose_Presentation_Conclusion_WhenConcentratedAndLatencyShifted(t *testing.T) {
+	md := ModelDiagnosis{RootCause: "tool.search_kb consistently times out", ProposedFix: "raise the timeout"}
+	latencyCaller := &recordingCaller{
+		fakeToolCaller: &fakeToolCaller{},
+		onCall: func(args map[string]any) mcp.ToolResult {
+			if args["error"] == true {
+				return scalarResult(5310000000)
+			}
+			return scalarResult(250000000)
+		},
+	}
+	agent := &Agent{
+		Gate:           &SourceEvidenceGate{Source: diagnosableGateSource()},
+		EvidenceSource: fakeEvidenceSource{ev: concentratedErrorEvidence(5)},
+		Reasoner:       canonicalReasoner{md: md},
+		SignalsCaller:  latencyCaller,
+	}
+	inc := Incident{CorrelationID: "corr-conclusion", Service: "support-agent", Environment: "local", Window: "1h"}
+
+	got, err := agent.Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	if got.Status != notify.StatusDiagnosed {
+		t.Fatalf("Status = %v, want %v", got.Status, notify.StatusDiagnosed)
+	}
+	if got.RootCause != md.RootCause || got.ProposedFix != md.ProposedFix {
+		t.Errorf("RootCause/ProposedFix = %q/%q, want the model's text (%q/%q)", got.RootCause, got.ProposedFix, md.RootCause, md.ProposedFix)
+	}
+	if got.Candidates != nil {
+		t.Errorf("Candidates = %+v, want nil for a Conclusion", got.Candidates)
+	}
+	if !got.Reversible {
+		t.Errorf("Reversible = false, want true (allowlisted fix text)")
+	}
+}
+
+func TestAgent_Diagnose_Presentation_RankedHypotheses_WhenOnlyOneGoldenSignal(t *testing.T) {
+	md := ModelDiagnosis{
+		Candidates: []ModelCandidate{
+			{RootCause: "tool.search_kb dependency is down", ProposedFix: "page the search team"},
+			{RootCause: "network partition to the search cluster", ProposedFix: "check network policies"},
+		},
+	}
+	agent := &Agent{
+		Gate:           &SourceEvidenceGate{Source: diagnosableGateSource()},
+		EvidenceSource: fakeEvidenceSource{ev: concentratedErrorEvidence(5)},
+		Reasoner:       canonicalReasoner{md: md},
+		// No SignalsCaller: only the concentration (errors) golden signal
+		// is available, which is not enough for a Conclusion by default.
+	}
+	inc := Incident{CorrelationID: "corr-ranked", Service: "support-agent", Environment: "local", Window: "1h"}
+
+	got, err := agent.Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	if got.Status != notify.StatusDiagnosed {
+		t.Fatalf("Status = %v, want %v", got.Status, notify.StatusDiagnosed)
+	}
+	if got.RootCause != "" || got.ProposedFix != "" {
+		t.Errorf("RootCause/ProposedFix = %q/%q, want empty (Candidates set instead)", got.RootCause, got.ProposedFix)
+	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("Candidates = %+v, want 2", got.Candidates)
+	}
+}
+
+func TestAgent_Diagnose_Presentation_CouldNotDetermine_SuppressesModelRootCause(t *testing.T) {
+	md := ModelDiagnosis{RootCause: "the model is confident it's tool.search_kb", ProposedFix: "raise the timeout"}
+	agent := &Agent{
+		Gate:           &SourceEvidenceGate{Source: diagnosableGateSource()},
+		EvidenceSource: fakeEvidenceSource{ev: concentratedErrorEvidence(1)}, // below the default min of 3
+		Reasoner:       canonicalReasoner{md: md},
+	}
+	inc := Incident{CorrelationID: "corr-cnd", Service: "support-agent", Environment: "local", Window: "1h"}
+
+	got, err := agent.Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+
+	if got.Status != notify.StatusIndeterminate {
+		t.Fatalf("Status = %v, want %v", got.Status, notify.StatusIndeterminate)
+	}
+	if got.RootCause != "" || got.ProposedFix != "" {
+		t.Errorf("RootCause/ProposedFix = %q/%q, want empty - the model's asserted root cause must never surface here", got.RootCause, got.ProposedFix)
+	}
+	if len(got.MissingEvidence) == 0 {
+		t.Errorf("expected MissingEvidence to explain the refusal")
+	}
+}
+
+// TestAgent_Diagnose_RaisingMinErrorSamples_FlipsConclusionToCouldNotDetermine
+// proves the presentation decision is driven by config, not by the
+// reasoner: identical evidence and identical model output, and only
+// Agent.Presentation.MinErrorSamples changes.
+func TestAgent_Diagnose_RaisingMinErrorSamples_FlipsConclusionToCouldNotDetermine(t *testing.T) {
+	md := ModelDiagnosis{RootCause: "tool.search_kb consistently times out", ProposedFix: "raise the timeout"}
+	latencyCaller := &recordingCaller{
+		fakeToolCaller: &fakeToolCaller{},
+		onCall: func(args map[string]any) mcp.ToolResult {
+			if args["error"] == true {
+				return scalarResult(5310000000)
+			}
+			return scalarResult(250000000)
+		},
+	}
+	newAgent := func(cfg PresentationConfig) *Agent {
+		return &Agent{
+			Gate:           &SourceEvidenceGate{Source: diagnosableGateSource()},
+			EvidenceSource: fakeEvidenceSource{ev: concentratedErrorEvidence(5)},
+			Reasoner:       canonicalReasoner{md: md},
+			SignalsCaller:  latencyCaller,
+			Presentation:   cfg,
+		}
+	}
+	inc := Incident{CorrelationID: "corr-flip", Service: "support-agent", Environment: "local", Window: "1h"}
+
+	before, err := newAgent(DefaultPresentationConfig()).Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose (default config): %v", err)
+	}
+	if before.Status != notify.StatusDiagnosed || before.RootCause == "" {
+		t.Fatalf("with default thresholds, expected a Conclusion, got %+v", before)
+	}
+
+	raised := DefaultPresentationConfig()
+	raised.MinErrorSamples = 1000
+	after, err := newAgent(raised).Diagnose(context.Background(), inc)
+	if err != nil {
+		t.Fatalf("Diagnose (raised min_error_samples): %v", err)
+	}
+	if after.Status != notify.StatusIndeterminate {
+		t.Fatalf("with min_error_samples=1000, expected CouldNotDetermine (indeterminate), got %+v", after)
+	}
+	if after.RootCause != "" {
+		t.Errorf("RootCause = %q, want empty once the rules refuse to conclude", after.RootCause)
 	}
 }
 

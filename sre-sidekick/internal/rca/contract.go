@@ -24,11 +24,11 @@ import (
 //     discarded - its root-cause text may still be useful even when its
 //     citations do not check out; it is simply presented without
 //     provenance.
-//   - Reversible is NOT taken from the model in M1: it always defaults to
-//     false. Whether a proposed fix is reversible (and therefore safe to
-//     present as low-risk) is an action-allowlist decision that does not
-//     exist yet; defaulting to false is the conservative choice until an
-//     allowlist says otherwise.
+//   - Reversible is NOT taken from the model: it is decided by
+//     reversibleForFix (reversible.go), a small deterministic allowlist of
+//     clearly-reversible action phrasing (PRD 13.3). The model never sets
+//     it, and anything not recognized by the allowlist defaults to false -
+//     the conservative choice.
 //   - Status is always StatusDiagnosed (the indeterminate path is handled
 //     before Render is ever called, by Agent.Diagnose) and Timestamp is
 //     set to the current time.
@@ -47,7 +47,7 @@ func Render(inc Incident, ev []notify.Evidence, md ModelDiagnosis) notify.Diagno
 		Grounding:     inc.Grounding,
 		RootCause:     md.RootCause,
 		ProposedFix:   md.ProposedFix,
-		Reversible:    false,
+		Reversible:    reversibleForFix(md.ProposedFix),
 		Candidates:    renderCandidates(md.Candidates, known),
 		Evidence:      ev,
 		Timestamp:     time.Now(),
@@ -63,7 +63,7 @@ func renderCandidates(candidates []ModelCandidate, known map[string]bool) []noti
 		out = append(out, notify.Candidate{
 			RootCause:   c.RootCause,
 			ProposedFix: c.ProposedFix,
-			Reversible:  false,
+			Reversible:  reversibleForFix(c.ProposedFix),
 			EvidenceIDs: filterKnownIDs(c.EvidenceIDs, known),
 		})
 	}

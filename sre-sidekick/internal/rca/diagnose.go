@@ -39,6 +39,23 @@ type Agent struct {
 	// Now returns the current time; overridable in tests. Defaults to
 	// time.Now.
 	Now func() time.Time
+	// SignalsCaller, when set, lets Diagnose compute the MCP-derived
+	// Signals (LatencyShift, ErrorRateDelta - see ComputeSignals in
+	// signals.go) the presentation rule engine (Decide/Present,
+	// presentation.go) can use, via a small bounded set of targeted
+	// signoz_aggregate_traces calls. Optional: nil leaves those two signals
+	// Present=false ("unknown") - ErrorSampleCount and Concentration, the
+	// signal PRD 13.4 requires to always work, are still always computed
+	// from the gathered evidence alone regardless of this field.
+	SignalsCaller MCPToolCaller
+	// Presentation configures Decide's thresholds (PRD 13.4): how many
+	// error samples and how much concentration/latency shift/error-rate
+	// delta/saturation it takes to move from CouldNotDetermine to
+	// RankedHypotheses to Conclusion. The zero value is not used directly -
+	// Decide and Present always apply withDefaults() - so leaving this unset
+	// is equivalent to DefaultPresentationConfig(). Callers that load
+	// sidekick.yaml (LoadPresentationConfig) should set this explicitly.
+	Presentation PresentationConfig
 }
 
 func (a *Agent) now() time.Time {
@@ -75,7 +92,15 @@ func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, e
 	if err != nil {
 		return notify.Diagnosis{}, fmt.Errorf("rca: reason: %w", err)
 	}
-	diagnosis := Render(inc, ev, md)
+
+	// PRD 13.4: the model authored md's text, but whether that text is
+	// shown as a single conclusion, ranked hypotheses, or suppressed
+	// entirely ( "could not determine") is decided here by the
+	// deterministic rule engine (Decide), operating on Signals computed
+	// from observability data - never by the model's own confidence.
+	signals := ComputeSignals(ctx, inc, ev, a.SignalsCaller, a.now())
+	mode := Decide(signals, md, a.Presentation)
+	diagnosis := Present(inc, ev, md, signals, mode, a.Presentation)
 	a.deliver(ctx, diagnosis)
 	return diagnosis, nil
 }

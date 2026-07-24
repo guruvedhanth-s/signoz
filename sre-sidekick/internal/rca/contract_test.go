@@ -50,7 +50,7 @@ func TestRender_DeterministicFieldsComeFromIncidentAndEvidence(t *testing.T) {
 		t.Errorf("Evidence must come only from the ev argument, got %+v", got.Evidence)
 	}
 	if got.Reversible {
-		t.Errorf("Reversible must default to false in M1, got true")
+		t.Errorf("Reversible must default to false for a fix not matched by the reversible allowlist, got true")
 	}
 	if got.RootCause != md.RootCause || got.ProposedFix != md.ProposedFix {
 		t.Errorf("model root cause/fix text was not copied through, got %+v", got)
