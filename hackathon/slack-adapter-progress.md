@@ -369,4 +369,4 @@ export SLACK_SIGNING_SECRET=...
 | — | 1 | `c084916` | Typed `sidekick.yaml` loader; env-var-named secrets, strict presence validation, unknown keys rejected |
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
-| — | 3 | pending | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
+| — | 3 | `a7daef5` | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
