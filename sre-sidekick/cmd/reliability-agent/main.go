@@ -38,6 +38,8 @@ func main() {
 			err = runSLO(os.Args[2:])
 		case "generate":
 			err = runGenerate(os.Args[2:])
+		case "audit":
+			err = runAudit(os.Args[2:])
 		case "audit-watch":
 			err = runAuditWatch(os.Args[2:])
 		case "diagnose":
@@ -140,6 +142,55 @@ func runAuditWatch(args []string) error {
 		"failures_before_alert", *failuresBeforeAlert,
 		"signoz_url", *signozURL)
 	return runner.Run(ctx)
+}
+
+// runAudit is the one-shot Track A command: a single audit cycle against
+// live SigNoz telemetry, printed as JSON. audit-watch is the continuous
+// version of the same check; this is what a human or a script runs once,
+// e.g. in the demo runbook's preflight or CI.
+func runAudit(args []string) error {
+	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
+	profilePath := fs.String("profile", "examples/demo-agent.yaml", "telemetry profile YAML path")
+	signozURL := fs.String("signoz-url", os.Getenv("SIGNOZ_URL"), "SigNoz base URL")
+	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
+	lookback := fs.Duration("lookback", 15*time.Minute, "SigNoz query lookback")
+	limit := fs.Int("limit", 200, "maximum records per audit query")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+
+	p, err := profile.LoadFile(*profilePath)
+	if err != nil {
+		return err
+	}
+	if p.Spec.Source.Adapter != "signoz" {
+		return fmt.Errorf("audit currently supports the signoz source adapter")
+	}
+	if *signozURL == "" {
+		*signozURL = p.Spec.Source.Endpoint
+	}
+	if *apiKey == "" {
+		return fmt.Errorf("SigNoz API key is required; set SIGNOZ_API_KEY or use --api-key")
+	}
+
+	client := signoz.NewClient(*signozURL, *apiKey)
+	runner := &monitor.Runner{
+		Profile:  p,
+		Source:   signoz.NewTelemetrySource(client, *limit),
+		Audit:    audit.Engine{},
+		Lookback: *lookback,
+	}
+	report, err := runner.RunOnce(context.Background(), time.Now())
+	if err != nil {
+		return err
+	}
+
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(report)
 }
 
 func runDiagnose(args []string) error {
