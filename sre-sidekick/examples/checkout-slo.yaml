@@ -23,3 +23,11 @@ slos:
     window: 30d
     latency_metric: http_server_request_duration_seconds
     threshold_ms: 1000
+    # This histogram follows the OTel semantic-convention "_seconds" naming
+    # and stores its "le" bucket boundaries in seconds. SigNoz's own
+    # zero-instrumentation "signoz_latency" metric does not - it uses
+    # milliseconds (the default when this field is omitted). Always check
+    # the actual stored "le" values for a given latency_metric before
+    # relying on this SLO; getting it wrong does not error, it silently
+    # reports a much lower SLI than reality.
+    latency_bucket_unit: s

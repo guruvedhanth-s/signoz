@@ -49,6 +49,17 @@ func TestDeriveMetricQueriesUsesConfiguredLabelsForCompleteness(t *testing.T) {
 	}
 }
 
+// TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries locks in the
+// default bucket unit, "ms": live-verified against a running SigNoz
+// instance that SigNoz's own zero-instrumentation latency histogram
+// (spanmetrics-processor "signoz_latency") stores "le" boundaries in
+// milliseconds (0.1, 1, 2, 6, 10, 50, 100, 250, 500, 1000, 1400, 2000,
+// 5000, 10000, 20000, 40000, 60000, +Inf - a 60000 boundary only makes
+// sense as 60 seconds in ms). Previously the code always divided
+// ThresholdMS by 1000 (assuming seconds unconditionally): a 1000ms
+// threshold queried le='1', which live-matched a real bucket - the "<=1ms"
+// one - not the intended "<=1000ms" bucket, so the query never errored but
+// silently computed the SLI against the wrong, far stricter cutoff.
 func TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries(t *testing.T) {
 	cfg := Config{Service: "checkout-api", Environment: "test"}
 	good, total, err := deriveMetricQueries(cfg, Definition{
@@ -61,9 +72,9 @@ func TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries(t *testing.T) {
 	if good.Metric != "request_duration_seconds_bucket" {
 		t.Fatalf("unexpected good metric: %q", good.Metric)
 	}
-	wantGoodFilter := `service_name = 'checkout-api' AND environment = 'test' AND le = '1'`
+	wantGoodFilter := `service_name = 'checkout-api' AND environment = 'test' AND le = '1000'`
 	if good.Filter != wantGoodFilter {
-		t.Fatalf("unexpected good filter: %q", good.Filter)
+		t.Fatalf("unexpected good filter: %q, want the threshold in milliseconds unconverted (default unit)", good.Filter)
 	}
 	if total.Metric != "request_duration_seconds_count" {
 		t.Fatalf("unexpected total metric: %q", total.Metric)
@@ -71,6 +82,24 @@ func TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries(t *testing.T) {
 	wantTotalFilter := `service_name = 'checkout-api' AND environment = 'test'`
 	if total.Filter != wantTotalFilter {
 		t.Fatalf("unexpected total filter: %q", total.Filter)
+	}
+}
+
+// TestDeriveMetricQueriesConvertsToSecondsWhenConfigured covers the "s"
+// unit for an OTel semantic-convention histogram (e.g. a custom
+// "*_duration_seconds" metric), which does store "le" in seconds.
+func TestDeriveMetricQueriesConvertsToSecondsWhenConfigured(t *testing.T) {
+	cfg := Config{Service: "checkout-api", Environment: "test"}
+	good, _, err := deriveMetricQueries(cfg, Definition{
+		Name: "latency", Type: SLITypeLatencyThreshold, Window: "30d",
+		LatencyMetric: "request_duration_seconds", ThresholdMS: 1000, LatencyBucketUnit: "s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGoodFilter := `service_name = 'checkout-api' AND environment = 'test' AND le = '1'`
+	if good.Filter != wantGoodFilter {
+		t.Fatalf("unexpected good filter: %q, want the threshold converted to seconds", good.Filter)
 	}
 }
 

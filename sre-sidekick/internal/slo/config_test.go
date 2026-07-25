@@ -58,6 +58,24 @@ func TestLatencyThresholdRequiresMetricAndPositiveThreshold(t *testing.T) {
 	}
 }
 
+func TestLatencyBucketUnitAcceptsMSAndSAndRejectsOther(t *testing.T) {
+	base := Definition{Name: "x", Type: SLITypeLatencyThreshold, Target: 0.99, Window: "1h", LatencyMetric: "duration", ThresholdMS: 1000}
+
+	for _, unit := range []string{"", "ms", "MS", "s", "S"} {
+		d := base
+		d.LatencyBucketUnit = unit
+		if err := d.Validate(); err != nil {
+			t.Errorf("latency_bucket_unit %q should be valid, got error: %v", unit, err)
+		}
+	}
+
+	invalid := base
+	invalid.LatencyBucketUnit = "minutes"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("expected an invalid latency_bucket_unit to be rejected")
+	}
+}
+
 func TestConfigRequiresServiceAndEnvironment(t *testing.T) {
 	cfg := Config{
 		SLOs: []Definition{{

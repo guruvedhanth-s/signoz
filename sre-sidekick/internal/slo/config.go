@@ -34,6 +34,22 @@ type Definition struct {
 	TotalMetric           string   `yaml:"total_metric" json:"total_metric,omitempty"`
 	LatencyMetric         string   `yaml:"latency_metric" json:"latency_metric,omitempty"`
 	ThresholdMS           float64  `yaml:"threshold_ms" json:"threshold_ms,omitempty"`
+	// LatencyBucketUnit is the unit LatencyMetric's histogram "le" bucket
+	// boundaries are stored in: "ms" (default) or "s". This is NOT a given
+	// - OTel semantic-convention histograms (e.g. a custom
+	// "*_duration_seconds" metric) use seconds, but SigNoz's own
+	// zero-instrumentation latency histogram (the spanmetrics-processor
+	// "signoz_latency" metric, the natural default latency_metric for any
+	// SigNoz-traced service) uses milliseconds - confirmed live against a
+	// running SigNoz instance (le values 0.1, 1, 2, 6, 10, 50, 100, 250,
+	// 500, 1000, 1400, 2000, 5000, 10000, 20000, 40000, 60000, +Inf; a
+	// 60-second bucket boundary is only sane if the unit is milliseconds).
+	// Getting this wrong does not error - the "le" filter still matches A
+	// bucket, just the wrong one, so the SLI silently comes out far too
+	// low (near 0%) rather than failing loudly. Defaults to "ms" to match
+	// SigNoz's own metric; set to "s" for a custom OTel-semconv seconds
+	// histogram.
+	LatencyBucketUnit string `yaml:"latency_bucket_unit" json:"latency_bucket_unit,omitempty"`
 	RequiresCompleteness  bool     `yaml:"requires_completeness" json:"requires_completeness,omitempty"`
 	CompletenessThreshold float64  `yaml:"completeness_threshold" json:"completeness_threshold,omitempty"`
 	Dependencies          []string `yaml:"dependencies" json:"dependencies,omitempty"`
@@ -110,6 +126,12 @@ func (d Definition) Validate() error {
 	case SLITypeLatencyThreshold:
 		if strings.TrimSpace(d.LatencyMetric) == "" || d.ThresholdMS <= 0 {
 			return fmt.Errorf("latency_threshold requires latency_metric and positive threshold_ms")
+		}
+		switch strings.ToLower(strings.TrimSpace(d.LatencyBucketUnit)) {
+		case "", "ms", "s":
+			// valid: empty defaults to "ms" (see LatencyBucketUnit doc)
+		default:
+			return fmt.Errorf("latency_bucket_unit must be \"ms\" or \"s\", got %q", d.LatencyBucketUnit)
 		}
 	default:
 		return fmt.Errorf("unsupported SLI type %q", d.Type)

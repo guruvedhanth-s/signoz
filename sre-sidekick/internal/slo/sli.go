@@ -55,14 +55,27 @@ func deriveMetricQueries(cfg Config, definition Definition) (source.MetricQuery,
 		if metric == "" {
 			return source.MetricQuery{}, source.MetricQuery{}, fmt.Errorf("latency metric is empty")
 		}
-		thresholdSeconds := strconv.FormatFloat(definition.ThresholdMS/1000, 'f', -1, 64)
-		bucketFilter := filter + fmt.Sprintf(" AND le = '%s'", thresholdSeconds)
+		thresholdValue := latencyThresholdBucketValue(definition)
+		bucketFilter := filter + fmt.Sprintf(" AND le = '%s'", thresholdValue)
 		good := counterQuery(metric+"_bucket", bucketFilter)
 		total := counterQuery(metric+"_count", filter)
 		return good, total, nil
 	default:
 		return source.MetricQuery{}, source.MetricQuery{}, fmt.Errorf("unsupported SLI type %q", definition.Type)
 	}
+}
+
+// latencyThresholdBucketValue converts ThresholdMS into the string the
+// histogram's "le" label is expected to carry, per LatencyBucketUnit.
+// Getting the unit wrong does not error - the filter still matches A
+// bucket, just the wrong one, silently corrupting the SLI instead of
+// failing loudly (see LatencyBucketUnit's doc comment for the live
+// evidence this default is based on).
+func latencyThresholdBucketValue(definition Definition) string {
+	if strings.EqualFold(strings.TrimSpace(definition.LatencyBucketUnit), "s") {
+		return strconv.FormatFloat(definition.ThresholdMS/1000, 'f', -1, 64)
+	}
+	return strconv.FormatFloat(definition.ThresholdMS, 'f', -1, 64)
 }
 
 func counterQuery(metric, filter string) source.MetricQuery {
