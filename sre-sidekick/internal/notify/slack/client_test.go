@@ -173,7 +173,7 @@ func testClient(t *testing.T, fake *fakePoster, opts ...Option) (*Client, *bytes
 func testConfig() config.SlackConfig {
 	return config.SlackConfig{
 		BotTokenEnv:      "SLACK_BOT_TOKEN",
-		SigningSecretEnv: "SLACK_SIGNING_SECRET",
+		AppTokenEnv:      "SLACK_APP_TOKEN",
 		DefaultChannel:   "#sre-sidekick",
 		SessionTTL:       "30m",
 		MaxConcurrentRCA: 5,

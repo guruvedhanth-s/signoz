@@ -57,7 +57,7 @@ Two shapes are being built, in order:
 | 2 | Block Kit rendering (pure functions) | **done** | `feat/slack-blocks` |
 | 3 | Slack client + `notify.Notifier` implementation | **done** | `feat/slack-client` |
 | 4 | Session store (`internal/session`) | **done** | `feat/slack-sessions` |
-| 5 | Inbound HTTP (signature verify, 3s ack, dedup) | not started | — |
+| 5 | Inbound door: Socket Mode receiver | **done** | `feat/slack-inbound` |
 | 6 | Handlers (interactivity, events, `/diagnose`) | not started | — |
 | 7 | Wire into the API server + `watch` subcommand | not started | — |
 | 8 | Integration tests + `sidekick_incidents` metrics | not started | — |
@@ -79,8 +79,15 @@ secret, err := cfg.Notify.Slack.SigningSecret() // reads $SLACK_SIGNING_SECRET
 ttl, err := cfg.Notify.Slack.SessionTTLDuration()
 ```
 
-Shape (`notify.slack.*` in YAML): `bot_token_env`, `signing_secret_env`,
+Shape (`notify.slack.*` in YAML): `bot_token_env`, `app_token_env`,
 `default_channel`, `session_ttl`, `max_concurrent_rca`.
+
+`app_token_env` was added in phase 5 and **`signing_secret_env` was removed**:
+request signatures authenticate an inbound HTTP endpoint, and Socket Mode
+means there isn't one. Both tokens have their prefix checked (`xoxb-` for the
+bot token, `xapp-` for the app-level token) because swapping them is the most
+common setup mistake and Slack's own error for it is unhelpful. The check
+never echoes the token value.
 
 ### Decisions
 
@@ -385,6 +392,99 @@ capped is the paid analysis, not the map entry.
 
 ---
 
+## 4c. Phase 5 — the inbound door, Socket Mode (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/socket.go`, `events.go`,
+`socket_test.go`
+
+### Why Socket Mode, and what it removes
+
+The adapter receives events over **Slack Socket Mode**: the sidekick dials
+*out* to Slack over a WebSocket and Slack pushes envelopes down it.
+
+This was a deliberate choice over HTTP request URLs:
+
+- **No public endpoint.** Nothing to expose, no TLS to terminate, no ngrok or
+  tunnel for a laptop demo, and nothing inbound to attack.
+- **No signature verification, and none needed.** Signature checks exist to
+  authenticate an inbound endpoint; the socket is authenticated once, when it
+  is dialled, by the app-level token. That is why `verify.go`, the replay
+  window, body caps and `url_verification` do not exist in this codebase.
+- **Trade-off:** Socket Mode cannot be used by an app distributed in Slack's
+  public directory. If this ever ships publicly, HTTP routes plus signature
+  verification come back — and the `Handler` seam below means only the
+  transport file changes.
+
+### What Socket Mode does *not* change
+
+- **Ack within three seconds.** Slack redelivers anything unacked, so every
+  envelope is acked immediately and the work is dispatched asynchronously
+  (**E11**).
+- **Deduplication.** Because Slack redelivers, and a reconnect can replay,
+  deliveries are deduped by `event_id`, falling back to `envelope_id`. Without
+  it the same human turn is processed twice.
+- **Bounded work.** A burst must not spawn unbounded goroutines or unbounded
+  paid analysis (**E8**).
+
+### The seam
+
+```go
+type Handler interface {
+    OnMessage(ctx context.Context, msg Message)
+    OnInteraction(ctx context.Context, interaction Interaction)
+    OnCommand(ctx context.Context, cmd Command)
+}
+
+receiver, err := slack.NewReceiver(events, acker, handler, opts...)
+err = receiver.Run(ctx)   // blocks until ctx is cancelled or the stream closes
+```
+
+The event stream and the `acker` are **injected**, not constructed inside the
+receiver. `*socketmode.Client` satisfies both in production; a plain channel
+and a recorder satisfy them in tests. That is why the entire inbound path is
+tested with no WebSocket and no network.
+
+`Message`, `Interaction` and `Command` (`events.go`) are the adapter's own
+narrow structs, so phase 6's logic is not coupled to slack-go's JSON shapes
+and can be tested by constructing a three-field value.
+
+### Behaviour worth knowing before editing
+
+- **Ack happens before dispatch, always** — including for envelopes the
+  receiver decides to ignore. An unacked envelope is simply redelivered, so
+  "ignore" must still mean "ack".
+- **Bot messages are dropped at the transport.** The sidekick's own posts come
+  back as message events; acting on them would make it answer itself forever.
+  Detected via `bot_id` or the `bot_message` subtype.
+- **Work runs on a detached context.** The envelope's context dies at ack, so
+  work hangs off `context.WithoutCancel(runCtx)` with its own 5 minute
+  timeout (`DefaultWorkTimeout`). Passing the envelope context through would
+  cancel every LLM call the instant it was acked — this is the single easiest
+  mistake to reintroduce here.
+- **Worker pool: 8 workers, queue 64** (`DefaultWorkers`,
+  `DefaultQueueSize`). A full queue **sheds load and logs at error level**
+  rather than growing without bound: a visible drop beats an invisible
+  backlog.
+- **Shutdown drains.** Accepted work has already been acked to Slack, so
+  abandoning it would silently lose a human's message. `Run` closes the job
+  channel and waits for workers before returning.
+- **A handler panic is contained** and logged with its stack; the receiver
+  keeps serving.
+- **Connection lifecycle events** (connecting, connected, disconnect,
+  invalid auth, errors) are logged, never dispatched, never acked.
+  Reconnection itself is `socketmode.Client`'s job.
+- **Dedup cache** is TTL-bounded (10 minutes) *and* capacity-bounded (4096),
+  evicting expired entries first and then the oldest. An empty id is treated
+  as new, because collapsing every unidentified delivery into one entry would
+  silently drop unrelated events.
+
+### Not in this phase
+
+No session lookup, no RCA, no replies. Phase 6 implements `Handler`; phase 5
+ships only a recording test double.
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -421,12 +521,14 @@ belong to Track D.
 
 ## 6. Landmines for whoever works on this next
 
-- **Slack retries anything slower than 3 seconds** (**E11**). Every inbound
-  handler must ack `200` immediately and do LLM/MCP work asynchronously, and
-  must dedupe on the Slack `event_id` / retry header, or the same human turn
-  gets processed twice.
-- **Signature verification is non-negotiable** on all three inbound routes.
-  Without it anyone on the internet can puppet the bot.
+- **Slack redelivers anything not acked within 3 seconds** (**E11**). The
+  receiver acks first and works asynchronously, and dedupes on `event_id`.
+  Phase 6 handlers must not reintroduce slow work before the ack.
+- **Never pass the envelope's context into async work.** It is cancelled at
+  ack. Use the detached, timeout-bounded context the receiver supplies.
+- **Socket Mode means no signature verification exists.** That is correct, not
+  an oversight: there is no inbound endpoint to authenticate. If HTTP routes
+  are ever added back, signature verification becomes mandatory again.
 - **The same alert fires repeatedly** (**E2**). Dedupe by fingerprint
   (`service + env + slo + window`) and update the existing thread rather than
   opening a second session and paying for a second RCA run.
@@ -456,9 +558,14 @@ gofmt -l internal && go vet ./...
 Slack work needs these in the environment (values from the Slack app config):
 
 ```bash
-export SLACK_BOT_TOKEN=xoxb-...
-export SLACK_SIGNING_SECRET=...
+export SLACK_BOT_TOKEN=xoxb-...   # bot token, for posting
+export SLACK_APP_TOKEN=xapp-...   # app-level token, for the Socket Mode dial
 ```
+
+Slack app setup for Socket Mode: enable Socket Mode, create an app-level token
+with `connections:write`, subscribe to `message.channels` (and
+`message.groups` for private channels), enable interactivity, and register the
+`/diagnose` slash command. No Request URL is needed for any of them.
 
 ---
 
@@ -470,4 +577,5 @@ export SLACK_SIGNING_SECRET=...
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
 | — | 4 | `2d01cc7` | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
+| — | 5 | pending | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
 | — | 3 | `a7daef5` | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
