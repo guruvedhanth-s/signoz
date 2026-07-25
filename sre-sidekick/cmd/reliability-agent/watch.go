@@ -18,6 +18,7 @@ import (
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
 	sidekickslack "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify/slack"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/session"
 )
 
@@ -40,6 +41,14 @@ const reapInterval = time.Minute
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	configPath := fs.String("config", DefaultConfigPath, "path to sidekick.yaml")
+	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL (also used as the public host rewritten into evidence links)")
+	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
+	limit := fs.Int("limit", 200, "maximum records per signal query")
+	mcpURL := fs.String("mcp-url", os.Getenv("SIGNOZ_MCP_URL"), "SigNoz MCP server URL; when set, evidence is gathered live via MCP tools instead of the M1 telemetry-source placeholder")
+	signozInternalURL := fs.String("signoz-internal-url", os.Getenv("SIGNOZ_INTERNAL_URL"), "SigNoz URL the MCP server should use to reach SigNoz (sent as the X-SigNoz-URL header); required when --mcp-url is set")
+	sloConfigPath := fs.String("slo-config", "examples/support-agent-slo.yaml", "SLO YAML path used to ground each diagnosis's grounding facts (SLO state, burn rate, error budget, telemetry trust)")
+	presentationConfigPath := fs.String("presentation-config", envOr("SIDEKICK_CONFIG", "sidekick.yaml"), "presentation rule config YAML path (PRD 13.4); a missing file falls back to built-in defaults")
+	window := fs.String("window", "1h", "default lookback window for evidence gathering when a human triggers a diagnosis (e.g. via /diagnose)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -54,10 +63,17 @@ func runWatch(args []string) error {
 		return err
 	}
 
-	return watchWithConfig(cfg.Notify.Slack)
+	return watchWithConfig(cfg.Notify.Slack, rcaConfig{
+		SignozURL:              *signozURL,
+		APIKey:                 *apiKey,
+		Limit:                  *limit,
+		MCPURL:                 *mcpURL,
+		SignozInternalURL:      *signozInternalURL,
+		PresentationConfigPath: *presentationConfigPath,
+	}, *sloConfigPath, *window)
 }
 
-func watchWithConfig(cfg config.SlackConfig) error {
+func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, window string) error {
 	// Metrics are optional: when no meter provider is configured the global one
 	// is a no-op, so the adapter runs identically without a collector.
 	metrics, err := sidekickslack.NewMetrics(otel.Meter("sre-sidekick"))
@@ -78,7 +94,7 @@ func watchWithConfig(cfg config.SlackConfig) error {
 	api := slackapi.New(botToken, slackapi.OptionAppLevelToken(appToken))
 	socket := socketmode.New(api)
 
-	client, err := sidekickslack.New(cfg,
+	slackClient, err := sidekickslack.New(cfg,
 		sidekickslack.WithPoster(api),
 		sidekickslack.WithMetrics(metrics),
 	)
@@ -92,11 +108,23 @@ func watchWithConfig(cfg config.SlackConfig) error {
 	}
 	sessions := session.NewManager(session.WithTTL(ttl))
 
-	// The analysis engine lives behind the RCA interface and is attached here
-	// when it is available. Until then the adapter says so plainly rather than
-	// inventing answers.
+	// buildRCAAgent preflights the OpenRouter reasoner (and the MCP server,
+	// when configured) at startup, same as `diagnose` - a missing dependency
+	// must be surfaced loudly here, not as a silent "not connected" reply the
+	// first time an alert fires (PRD section 19).
+	agent, signozClient, err := buildRCAAgent(context.Background(), rcaCfg)
+	if err != nil {
+		return fmt.Errorf("build RCA agent: %w", err)
+	}
+	rcaAdapter := &rca.SlackAdapter{
+		Agent:         agent,
+		Metrics:       signozClient,
+		SLOConfigPath: sloConfigPath,
+		Window:        window,
+	}
+
 	coordinator, err := sidekickslack.NewCoordinator(
-		client, sessions, sidekickslack.UnavailableRCA{},
+		slackClient, sessions, rcaAdapter,
 		sidekickslack.WithDefaultEnvironment(cfg.DefaultEnvironment),
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
 		sidekickslack.WithCoordinatorMetrics(metrics),
