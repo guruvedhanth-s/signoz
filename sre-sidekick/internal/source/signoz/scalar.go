@@ -135,7 +135,7 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 	if err := c.QueryRange(ctx, request, &response); err != nil {
 		return 0, err
 	}
-	return response.scalar(), nil
+	return response.scalar()
 }
 
 // scalarBuilderResponse parses SigNoz's ScalarData response shape:
@@ -144,8 +144,17 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 // columns and no rows; that is a valid answer of 0, not an error - see
 // MetricQuerier's documented contract. The SLO engine's total<=0 check is
 // what turns a genuinely absent total metric into ErrNoData.
+//
+// Status is SigNoz's application-level result ("success" or "error"),
+// distinct from the HTTP status code requestJSON already checks: a
+// malformed query or an internal query-engine failure can still come back
+// as HTTP 200 with Status "error" and an empty/absent Results, which would
+// otherwise silently parse as a valid answer of 0 - indistinguishable from
+// a metric that genuinely has no samples. scalar() treats that as an
+// error rather than a zero.
 type scalarBuilderResponse struct {
-	Data struct {
+	Status string `json:"status"`
+	Data   struct {
 		Data struct {
 			Results []struct {
 				Columns []struct {
@@ -157,7 +166,10 @@ type scalarBuilderResponse struct {
 	} `json:"data"`
 }
 
-func (r scalarBuilderResponse) scalar() float64 {
+func (r scalarBuilderResponse) scalar() (float64, error) {
+	if r.Status != "" && r.Status != "success" {
+		return 0, fmt.Errorf("SigNoz scalar builder query returned status %q", r.Status)
+	}
 	var sum float64
 	for _, result := range r.Data.Data.Results {
 		for _, row := range result.Data {
@@ -169,5 +181,5 @@ func (r scalarBuilderResponse) scalar() float64 {
 			}
 		}
 	}
-	return sum
+	return sum, nil
 }

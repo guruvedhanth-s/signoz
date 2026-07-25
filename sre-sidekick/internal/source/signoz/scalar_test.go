@@ -139,6 +139,30 @@ func TestScalarBuilderReturnsZeroForEmptyResult(t *testing.T) {
 	}
 }
 
+// TestScalarBuilderErrorsOnNonSuccessStatus locks in the fix for a bug
+// where scalarBuilderResponse.scalar() never looked at the response's
+// application-level Status field: a malformed query or an internal
+// query-engine failure can come back as HTTP 200 with status "error" and
+// empty results, which parsed as a silent scalar of 0 - indistinguishable
+// from a metric that genuinely has no samples in the window. ScalarBuilder
+// must return an error here instead.
+func TestScalarBuilderErrorsOnNonSuccessStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"error","error":"query execution failed","data":{"data":{"results":[]}}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+	_, err := client.ScalarBuilder(context.Background(), source.MetricQuery{
+		Metric: "agent_grounded_answers_total",
+		Filter: "service_name = 'support-agent' AND environment = 'local'",
+	}, 1000, 2000)
+	if err == nil {
+		t.Fatal("expected an error for a response with status \"error\", got nil (silently parsed as scalar 0)")
+	}
+}
+
 // writeScalarBuilderResponse writes a response in SigNoz's ScalarData shape
 // (aggregation columns plus a single data row), matching what SigNoz
 // returns for a builder_query scalar request with reduceTo set.
