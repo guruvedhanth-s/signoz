@@ -1,0 +1,69 @@
+name: sre-sidekick-ci
+
+# sre-sidekick is a separate Go module (its own go.mod under sre-sidekick/),
+# so it is out of scope for goci.yaml's GO_TEST_CONTEXT (root module only).
+# goci.yaml is also gated on `! github.event.pull_request.head.repo.fork`,
+# which is always true here because this repo is itself a GitHub fork, so no
+# PR in this repo ever ran that pipeline. This workflow is scoped to our own
+# module and directory, with no fork/label gating, so it runs on every PR
+# that touches sre-sidekick/.
+
+on:
+  pull_request:
+    paths:
+      - "sre-sidekick/**"
+      - ".github/workflows/sre-sidekick-ci.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - "sre-sidekick/**"
+      - ".github/workflows/sre-sidekick-ci.yaml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sre-sidekick
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: sre-sidekick/go.sum
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        # -cover is deliberately omitted: `go test ./... -cover` invokes
+        # `go tool covdata` to merge results once any package in the set has
+        # no test files (internal/evidence, internal/registry,
+        # internal/source all have none today), and that tool is absent from
+        # this runner's Go toolchain install. Coverage isn't gated here, so
+        # plain -race is enough.
+        run: go test ./... -race
+  fmt:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sre-sidekick
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: sre-sidekick/go.sum
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "the following files are not gofmt'd:"
+            echo "$out"
+            exit 1
+          fi
