@@ -123,6 +123,31 @@ func TestEngineForwardsDefinitionLabelOverridesToGate(t *testing.T) {
 	}
 }
 
+// TestEngineForwardsEvaluationNowToGate locks in the fix for a bug where
+// the completeness gate always scoped its presence check to its own wall
+// clock, ignoring the `now` Engine.Evaluate was actually scoring the SLI
+// against - so a historical evaluation (e.g. server.go's SLORequest.Now)
+// got a completeness verdict for the current moment instead of the window
+// under evaluation. Evaluate must pass the same `now` it uses for the SLI
+// query into GateRequest.Now.
+func TestEngineForwardsEvaluationNowToGate(t *testing.T) {
+	gate := &capturingGate{Result: GateResult{Coverage: 1, QueryComplete: true}}
+	engine := NewEngine(fakeMetrics{Values: map[string]float64{"good": 995, "total": 1000}}, gate)
+
+	historicalNow := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
+		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total", RequiresCompleteness: true,
+		Dependencies: []string{"requests"},
+	}}}
+	if _, err := engine.Evaluate(context.Background(), cfg, historicalNow); err != nil {
+		t.Fatal(err)
+	}
+	if !gate.Request.Now.Equal(historicalNow) {
+		t.Fatalf("gate request Now = %v, want the evaluation's historical now %v", gate.Request.Now, historicalNow)
+	}
+}
+
 func TestEngineNoDataIsIndeterminate(t *testing.T) {
 	engine := NewEngine(fakeMetrics{Values: map[string]float64{"total": 0}}, nil)
 	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
