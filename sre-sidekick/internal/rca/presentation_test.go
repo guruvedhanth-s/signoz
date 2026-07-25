@@ -165,7 +165,7 @@ func TestSupportingSignals_Count(t *testing.T) {
 func TestPresent_Conclusion_SingleRootCauseNoCandidates(t *testing.T) {
 	inc := Incident{CorrelationID: "corr-1", Service: "support-agent", Environment: "local", Window: "1h"}
 	ev := []notify.Evidence{{ID: "e1", Kind: notify.EvidenceKindTrace, Note: "trace"}}
-	md := ModelDiagnosis{RootCause: "tool.search_kb times out", ProposedFix: "raise the timeout"}
+	md := ModelDiagnosis{RootCause: "tool.search_kb times out", ProposedFix: "raise the timeout", EvidenceIDs: []string{"e1", "e99"}}
 
 	got := Present(inc, ev, md, Signals{}, ModeConclusion, DefaultPresentationConfig())
 
@@ -175,6 +175,9 @@ func TestPresent_Conclusion_SingleRootCauseNoCandidates(t *testing.T) {
 	if got.RootCause != md.RootCause || got.ProposedFix != md.ProposedFix {
 		t.Errorf("RootCause/ProposedFix = %q/%q, want the model's text copied through", got.RootCause, got.ProposedFix)
 	}
+	if want := []string{"e1"}; !equalStrings(got.EvidenceIDs, want) {
+		t.Errorf("EvidenceIDs = %v, want %v (unknown id e99 must be dropped even for a stated Conclusion)", got.EvidenceIDs, want)
+	}
 	if got.Candidates != nil {
 		t.Errorf("Candidates = %v, want nil for a Conclusion", got.Candidates)
 	}
@@ -183,6 +186,31 @@ func TestPresent_Conclusion_SingleRootCauseNoCandidates(t *testing.T) {
 	}
 	if len(got.MissingEvidence) != 0 {
 		t.Errorf("MissingEvidence = %v, want empty for a Conclusion", got.MissingEvidence)
+	}
+}
+
+// TestPresent_Conclusion_PromotedCandidateCarriesItsEvidenceIDs covers the
+// other ModeConclusion path: the model expressed its one answer as a
+// single Candidate (no top-level RootCause) and the rules decided that is
+// confident enough to state as a Conclusion. The promoted text's citation
+// must come along with it - a promoted candidate is not exempt from
+// carrying its own evidence just because it moved to the top level.
+func TestPresent_Conclusion_PromotedCandidateCarriesItsEvidenceIDs(t *testing.T) {
+	inc := Incident{Service: "support-agent", Window: "1h"}
+	ev := []notify.Evidence{{ID: "e1", Kind: notify.EvidenceKindTrace, Note: "trace"}}
+	md := ModelDiagnosis{
+		Candidates: []ModelCandidate{
+			{RootCause: "tool.search_kb times out", ProposedFix: "raise the timeout", EvidenceIDs: []string{"e1", "e99"}},
+		},
+	}
+
+	got := Present(inc, ev, md, Signals{}, ModeConclusion, DefaultPresentationConfig())
+
+	if got.RootCause != "tool.search_kb times out" {
+		t.Fatalf("RootCause = %q, want the promoted candidate's text", got.RootCause)
+	}
+	if want := []string{"e1"}; !equalStrings(got.EvidenceIDs, want) {
+		t.Errorf("EvidenceIDs = %v, want %v (the promoted candidate's own filtered citation)", got.EvidenceIDs, want)
 	}
 }
 

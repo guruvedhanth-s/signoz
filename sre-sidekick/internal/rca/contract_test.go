@@ -77,6 +77,30 @@ func TestRender_DeterministicFieldsComeFromIncidentAndEvidence(t *testing.T) {
 	}
 }
 
+// TestRender_TopLevelRootCauseCitesEvidenceLikeACandidate locks in the fix
+// for a bug where a Candidate's EvidenceIDs were filtered against known
+// evidence (filterKnownIDs) but the top-level RootCause - the single
+// stated conclusion - had no citation field at all, so its claim was never
+// checked against any evidence. The top-level RootCause must go through
+// the identical filterKnownIDs treatment as a Candidate: it is not exempt
+// from citing evidence just because it is the conclusion rather than one
+// of several hypotheses.
+func TestRender_TopLevelRootCauseCitesEvidenceLikeACandidate(t *testing.T) {
+	inc := Incident{Service: "checkout", Window: "1h"}
+	ev := []notify.Evidence{{ID: "e1", Kind: notify.EvidenceKindTrace, Note: "trace"}}
+	md := ModelDiagnosis{
+		RootCause:   "payment gateway timeout",
+		ProposedFix: "increase gateway timeout",
+		EvidenceIDs: []string{"e1", "e99"},
+	}
+
+	got := Render(inc, ev, md)
+
+	if want := []string{"e1"}; !equalStrings(got.EvidenceIDs, want) {
+		t.Errorf("EvidenceIDs = %v, want %v (unknown id e99 must be dropped, same as a candidate's)", got.EvidenceIDs, want)
+	}
+}
+
 func TestRender_NoCandidatesLeavesCandidatesNil(t *testing.T) {
 	inc := Incident{Service: "checkout", Window: "1h"}
 	md := ModelDiagnosis{RootCause: "x", ProposedFix: "y"}

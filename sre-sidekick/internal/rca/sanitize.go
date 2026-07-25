@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file hardens the RCA agent against prompt injection carried in
@@ -123,6 +124,10 @@ func stripControlChars(s string) string {
 	return controlCharPattern.ReplaceAllString(s, "")
 }
 
+// truncateText caps s at max bytes, cutting on a rune boundary rather than
+// a raw byte index - telemetry text (exception messages, log bodies) is
+// not guaranteed to be ASCII, and slicing mid-rune would emit invalid
+// UTF-8 into a rendered message or an LLM prompt.
 func truncateText(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -130,6 +135,9 @@ func truncateText(s string, max int) string {
 	cut := max - len(truncatedSuffix)
 	if cut < 0 {
 		cut = 0
+	}
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
 	return s[:cut] + truncatedSuffix
 }

@@ -83,6 +83,46 @@ func TestEngineCompletenessFailureIsIndeterminate(t *testing.T) {
 	}
 }
 
+// capturingGate records the GateRequest it was called with, for asserting
+// what the engine forwarded to it.
+type capturingGate struct {
+	Result  GateResult
+	Request GateRequest
+}
+
+func (g *capturingGate) Check(_ context.Context, request GateRequest) (GateResult, error) {
+	g.Request = request
+	return g.Result, nil
+}
+
+// TestEngineForwardsDefinitionLabelOverridesToGate locks in a
+// per-Definition ServiceLabel/EnvironmentLabel override reaching the
+// completeness gate, not just the SLI query - live-verified necessary
+// because a Config commonly mixes custom-instrumented counters
+// ("service_name"/"environment") with SigNoz's own spanmetrics-derived
+// metrics (OTel resource semantic-convention keys "service.name"/
+// "deployment.environment" instead), and a definition requiring
+// completeness on the latter needs the gate scoped the same way the SLI
+// query is.
+func TestEngineForwardsDefinitionLabelOverridesToGate(t *testing.T) {
+	gate := &capturingGate{Result: GateResult{Coverage: 1, QueryComplete: true}}
+	engine := NewEngine(fakeMetrics{Values: map[string]float64{"good": 5, "total": 10}}, gate)
+	cfg := Config{Service: "support-agent", Environment: "local", SLOs: []Definition{{
+		Name: "span-latency", Type: SLITypeRatio, Target: 0.5, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total", RequiresCompleteness: true,
+		Dependencies:     []string{"signoz_latency"},
+		ServiceLabel:     "service.name",
+		EnvironmentLabel: "deployment.environment",
+	}}}
+	if _, err := engine.Evaluate(context.Background(), cfg, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if gate.Request.ServiceLabel != "service.name" || gate.Request.EnvironmentLabel != "deployment.environment" {
+		t.Fatalf("gate request labels = %q/%q, want the per-definition override",
+			gate.Request.ServiceLabel, gate.Request.EnvironmentLabel)
+	}
+}
+
 func TestEngineNoDataIsIndeterminate(t *testing.T) {
 	engine := NewEngine(fakeMetrics{Values: map[string]float64{"total": 0}}, nil)
 	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{

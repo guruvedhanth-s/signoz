@@ -74,6 +74,18 @@ func (a *Agent) now() time.Time {
 //     (fetched exactly once per call, see checkGate), call the reasoner,
 //     and render the final notify.Diagnosis.
 func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, error) {
+	// PRD 13.4 rule 1 / notify.Grounding.TelemetryTrusted's own contract:
+	// "when false, diagnosis must be StatusIndeterminate". This is checked
+	// before the (separate) RCA evidence gate and before the reasoner is
+	// ever called: an SLO completeness verdict of "not trusted" means the
+	// facts this incident is grounded on cannot be relied on, regardless
+	// of what evidence happens to be available for the reasoner to read.
+	if !inc.Grounding.TelemetryTrusted {
+		diagnosis := a.untrustedTelemetry(inc)
+		a.deliver(ctx, diagnosis)
+		return diagnosis, nil
+	}
+
 	result, snapshot, err := a.checkGate(ctx, inc)
 	if err != nil {
 		return notify.Diagnosis{}, err
@@ -90,7 +102,9 @@ func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, e
 	}
 	md, err := a.Reasoner.Reason(ctx, inc, ev)
 	if err != nil {
-		return notify.Diagnosis{}, fmt.Errorf("rca: reason: %w", err)
+		diagnosis := a.reasonerFailed(inc, ev, err)
+		a.deliver(ctx, diagnosis)
+		return diagnosis, nil
 	}
 
 	// PRD 13.4: the model authored md's text, but whether that text is
@@ -145,6 +159,48 @@ func (a *Agent) checkGate(ctx context.Context, inc Incident) (EvidenceResult, ev
 	}
 	result, err := a.Gate.Check(ctx, inc)
 	return result, evidence.Snapshot{}, err
+}
+
+// untrustedTelemetry builds the indeterminate diagnosis for an incident
+// whose SLO completeness gate marked the telemetry untrusted. Distinct
+// wording from missingEvidence(EvidenceResult) - see couldNotDetermineReason
+// in presentation.go for the same rationale - so on-call can tell "we never
+// looked because the telemetry was untrustworthy" apart from "we looked and
+// found nothing conclusive".
+func (a *Agent) untrustedTelemetry(inc Incident) notify.Diagnosis {
+	return notify.Diagnosis{
+		CorrelationID:   inc.CorrelationID,
+		Service:         inc.Service,
+		Environment:     inc.Environment,
+		Window:          inc.Window,
+		Status:          notify.StatusIndeterminate,
+		Grounding:       inc.Grounding,
+		MissingEvidence: []string{"SLO completeness gate did not trust the telemetry for this window; refusing to diagnose"},
+		Timestamp:       a.now(),
+	}
+}
+
+// reasonerFailed builds the indeterminate diagnosis for an incident whose
+// Reasoner could not produce a diagnosis: a transport failure, an LLM
+// outage, or (see reasoner_llm.go's loop) a response that never became
+// parseable JSON even after a retry. A reasoner failure must never
+// silently produce nothing - on-call would see no message at all for a
+// real incident - and must never be mistaken for a real diagnosis just
+// because some ModelDiagnosis-shaped fallback text existed. The evidence
+// already gathered is still attached, so a human reviewing this
+// indeterminate result is not left with nothing to look at.
+func (a *Agent) reasonerFailed(inc Incident, ev []notify.Evidence, err error) notify.Diagnosis {
+	return notify.Diagnosis{
+		CorrelationID:   inc.CorrelationID,
+		Service:         inc.Service,
+		Environment:     inc.Environment,
+		Window:          inc.Window,
+		Status:          notify.StatusIndeterminate,
+		Grounding:       inc.Grounding,
+		Evidence:        ev,
+		MissingEvidence: []string{fmt.Sprintf("the reasoning agent could not produce a diagnosis: %v", err)},
+		Timestamp:       a.now(),
+	}
 }
 
 func (a *Agent) indeterminate(inc Incident, result EvidenceResult) notify.Diagnosis {
@@ -225,9 +281,21 @@ func gatherEvidenceFromSnapshot(inc Incident, snapshot evidence.Snapshot) []noti
 	return out
 }
 
+// evidenceNote builds the Note for one snapshot-derived evidence item.
+// r.Selector comes straight from a raw telemetry field (name, span_name,
+// metric_name, operation_name - see normalizeSignal in
+// internal/source/signoz/telemetry.go) written by the instrumented
+// application, so it is exactly as attacker-controllable as any other
+// telemetry text: this is the same class of injection risk sanitize.go
+// exists to defend against for the MCP evidence path
+// (evidence_mcp.go), but this M1/default path (used whenever
+// Agent.EvidenceSource is unset - i.e. whenever --mcp-url is not
+// configured) built its Note directly from the raw field with no
+// sanitization at all. SanitizeNote strips control characters and caps
+// the length, same as every other evidence Note in this package.
 func evidenceNote(kind notify.EvidenceKind, r evidence.Record) string {
 	if r.Selector != "" {
-		return fmt.Sprintf("%s: %s", kind, r.Selector)
+		return SanitizeNote(fmt.Sprintf("%s: %s", kind, r.Selector))
 	}
 	return string(kind)
 }

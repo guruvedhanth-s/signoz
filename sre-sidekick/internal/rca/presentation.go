@@ -284,41 +284,50 @@ func Present(inc Incident, ev []notify.Evidence, md ModelDiagnosis, signals Sign
 
 	switch mode {
 	case ModeConclusion:
-		base.Candidates = nil
-		if base.RootCause == "" && len(md.Candidates) > 0 {
+		if base.RootCause == "" && len(base.Candidates) > 0 {
 			// The model expressed its one answer as a single candidate
 			// rather than top-level RootCause/ProposedFix; the rules still
 			// decided this is confident enough to state as one conclusion,
-			// so present that candidate's text as the conclusion.
-			top := md.Candidates[0]
+			// so present that candidate's text (and its already-filtered
+			// EvidenceIDs - base.Candidates went through Render's
+			// filterKnownIDs, same as the top-level field) as the
+			// conclusion.
+			top := base.Candidates[0]
 			base.RootCause = top.RootCause
 			base.ProposedFix = top.ProposedFix
-			base.Reversible = reversibleForFix(top.ProposedFix)
+			base.EvidenceIDs = top.EvidenceIDs
+			base.Reversible = top.Reversible
 		}
+		base.Candidates = nil
 		return base
 
 	case ModeRankedHypotheses:
-		base.RootCause = ""
-		base.ProposedFix = ""
-		base.Reversible = false
 		if len(base.Candidates) == 0 {
 			// The model gave one flat answer, but the rules decided the
 			// evidence does not support stating it as a settled
 			// conclusion - present it as a (single-entry) ranked
 			// hypothesis instead of silently upgrading it to a
-			// Conclusion.
+			// Conclusion. base.EvidenceIDs is already Render's
+			// filterKnownIDs result for md.EvidenceIDs, so it carries
+			// straight over as the hypothesis's own citation.
 			base.Candidates = []notify.Candidate{{
 				RootCause:   md.RootCause,
 				ProposedFix: md.ProposedFix,
 				Reversible:  reversibleForFix(md.ProposedFix),
+				EvidenceIDs: base.EvidenceIDs,
 			}}
 		}
+		base.RootCause = ""
+		base.ProposedFix = ""
+		base.EvidenceIDs = nil
+		base.Reversible = false
 		return base
 
 	default: // ModeCouldNotDetermine
 		base.Status = notify.StatusIndeterminate
 		base.RootCause = ""
 		base.ProposedFix = ""
+		base.EvidenceIDs = nil
 		base.Reversible = false
 		base.Candidates = nil
 		base.MissingEvidence = couldNotDetermineReason(signals, cfg)

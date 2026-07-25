@@ -31,6 +31,11 @@ type EvidenceResult struct {
 	// minimum record count) is left for a later milestone once real
 	// incidents show what actually helps.
 	Sufficient bool
+	// Partial reports that the snapshot behind this result was truncated
+	// (evidence.Snapshot.Partial - e.g. a trace or log query hit its row
+	// limit): Sufficient may still be true when real evidence was found
+	// despite the truncation, but a diagnosis built on it should say so.
+	Partial bool
 	// Reason is a short human-readable explanation of the Sufficient
 	// verdict, e.g. what evidence was found or what was missing.
 	Reason string
@@ -125,10 +130,26 @@ func evidenceProfile(service, environment string) profile.Profile {
 }
 
 func evaluateSnapshot(snapshot evidence.Snapshot) EvidenceResult {
+	// A query that did not complete (QueryComplete=false - the source
+	// failed, timed out, or otherwise could not run the query) means we do
+	// not actually know what evidence exists for this window: whatever
+	// records happen to be in the snapshot are not a reliable answer to
+	// "is there enough signal here", and treating them as sufficient would
+	// let the reasoner run on evidence that might be entirely missing.
+	// PRD invariant: missing or failed evidence must resolve to
+	// indeterminate, never to a pass - fail safe here rather than trusting
+	// a snapshot the source itself could not finish fetching.
+	if !snapshot.QueryComplete {
+		return EvidenceResult{
+			Reason: "the telemetry query for this window did not complete; treating evidence as insufficient rather than reasoning over an unreliable snapshot",
+		}
+	}
+
 	result := EvidenceResult{
 		HasLogs:       len(snapshot.Logs) > 0,
 		HasErrorSpans: anyRecordHasError(snapshot.Traces),
 		HasExceptions: anyRecordHasException(snapshot.Traces) || anyRecordHasException(snapshot.Logs),
+		Partial:       snapshot.Partial,
 	}
 	result.Sufficient = result.HasErrorSpans || result.HasExceptions || result.HasLogs
 	result.Reason = evidenceReason(snapshot, result)
@@ -147,7 +168,15 @@ func evidenceReason(snapshot evidence.Snapshot, result EvidenceResult) string {
 		if result.HasLogs {
 			found = append(found, "logs")
 		}
-		return "found " + joinWithAnd(found) + " for the incident window"
+		reason := "found " + joinWithAnd(found) + " for the incident window"
+		if result.Partial {
+			// A truncated query still returned real evidence; the
+			// reasoner may proceed, but the diagnosis should say the
+			// evidence set was not the full picture (e.g. a query hit
+			// its row limit).
+			reason += " (the query was truncated - a row limit was hit - so this may not be the complete picture)"
+		}
+		return reason
 	}
 	if !snapshot.SignalAvailable("traces") {
 		return "traces are unavailable from the telemetry source, and no logs or exceptions were found for the incident window"

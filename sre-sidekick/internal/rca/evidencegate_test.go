@@ -25,6 +25,7 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 		{
 			name: "error spans present",
 			snapshot: evidence.Snapshot{
+				QueryComplete:    true,
 				AvailableSignals: map[string]bool{"traces": true},
 				Traces: []evidence.Record{
 					{Selector: "POST /checkout", Fields: map[string]any{"status_code": float64(500)}},
@@ -36,13 +37,14 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 		},
 		{
 			name:           "empty snapshot is insufficient",
-			snapshot:       evidence.Snapshot{AvailableSignals: map[string]bool{"traces": true, "logs": true}},
+			snapshot:       evidence.Snapshot{QueryComplete: true, AvailableSignals: map[string]bool{"traces": true, "logs": true}},
 			wantSufficient: false,
 			reasonContains: "no error spans",
 		},
 		{
 			name: "traces unavailable is reflected in reason",
 			snapshot: evidence.Snapshot{
+				QueryComplete:    true,
 				AvailableSignals: map[string]bool{"traces": false},
 			},
 			wantSufficient: false,
@@ -51,6 +53,7 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 		{
 			name: "logs alone are sufficient",
 			snapshot: evidence.Snapshot{
+				QueryComplete:    true,
 				AvailableSignals: map[string]bool{"traces": true, "logs": true},
 				Logs:             []evidence.Record{{Selector: "app.log", Fields: map[string]any{"message": "boom"}}},
 			},
@@ -61,6 +64,7 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 		{
 			name: "exception field is sufficient",
 			snapshot: evidence.Snapshot{
+				QueryComplete:    true,
 				AvailableSignals: map[string]bool{"traces": true},
 				Traces: []evidence.Record{
 					{Selector: "checkout.charge", Fields: map[string]any{"exception.message": "nil pointer dereference"}},
@@ -73,6 +77,7 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 		{
 			name: "ok status is not an error",
 			snapshot: evidence.Snapshot{
+				QueryComplete:    true,
 				AvailableSignals: map[string]bool{"traces": true},
 				Traces: []evidence.Record{
 					{Selector: "GET /health", Fields: map[string]any{"status_code": float64(200)}},
@@ -80,6 +85,26 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 			},
 			wantSufficient: false,
 			reasonContains: "no error spans",
+		},
+		{
+			// Locks in the fix for a bug where a snapshot whose query never
+			// completed (a source failure or timeout) was still evaluated
+			// as if the records it happened to carry were the real answer -
+			// so a truncated/failed trace query plus one incidental log
+			// record could be declared "sufficient" evidence to run the
+			// paid reasoner. A query that did not complete must never be
+			// treated as a pass.
+			name: "query did not complete is insufficient even with records present",
+			snapshot: evidence.Snapshot{
+				QueryComplete:    false,
+				AvailableSignals: map[string]bool{"traces": true, "logs": true},
+				Logs:             []evidence.Record{{Selector: "app.log", Fields: map[string]any{"message": "boom"}}},
+				Traces: []evidence.Record{
+					{Selector: "POST /checkout", Fields: map[string]any{"status_code": float64(500)}},
+				},
+			},
+			wantSufficient: false,
+			reasonContains: "did not complete",
 		},
 	}
 
@@ -112,6 +137,37 @@ func TestSourceEvidenceGate_Check(t *testing.T) {
 				t.Errorf("Reason = %q, want it to contain %q", result.Reason, tt.reasonContains)
 			}
 		})
+	}
+}
+
+// TestSourceEvidenceGate_Check_PartialSnapshotStillSufficientButFlagged
+// proves the gate distinguishes a truncated-but-completed query (Partial)
+// from an incomplete one (QueryComplete=false, tested above): a query that
+// hit its row limit still returned real evidence, so Sufficient can be
+// true, but the result must say the evidence may not be the full picture.
+func TestSourceEvidenceGate_Check_PartialSnapshotStillSufficientButFlagged(t *testing.T) {
+	snapshot := evidence.Snapshot{
+		QueryComplete:    true,
+		Partial:          true,
+		AvailableSignals: map[string]bool{"traces": true},
+		Traces: []evidence.Record{
+			{Selector: "POST /checkout", Fields: map[string]any{"status_code": float64(500)}},
+		},
+	}
+	gate := &SourceEvidenceGate{Source: source.MemorySource{Data: snapshot}, Now: func() time.Time { return time.Unix(0, 0) }}
+
+	result, err := gate.Check(context.Background(), Incident{Service: "s", Window: "1h"})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !result.Sufficient {
+		t.Fatalf("Sufficient = false, want true (real evidence was found, truncation just means there may be more)")
+	}
+	if !result.Partial {
+		t.Errorf("Partial = false, want true")
+	}
+	if !strings.Contains(result.Reason, "truncated") {
+		t.Errorf("Reason = %q, want it to note the query was truncated", result.Reason)
 	}
 }
 

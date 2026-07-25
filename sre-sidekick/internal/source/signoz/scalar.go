@@ -2,6 +2,7 @@ package signoz
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
@@ -135,7 +136,7 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 	if err := c.QueryRange(ctx, request, &response); err != nil {
 		return 0, err
 	}
-	return response.scalar(), nil
+	return response.scalar()
 }
 
 // scalarBuilderResponse parses SigNoz's ScalarData response shape:
@@ -144,20 +145,43 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 // columns and no rows; that is a valid answer of 0, not an error - see
 // MetricQuerier's documented contract. The SLO engine's total<=0 check is
 // what turns a genuinely absent total metric into ErrNoData.
+//
+// Status is SigNoz's application-level result ("success" or "error"),
+// distinct from the HTTP status code requestJSON already checks: a
+// malformed query or an internal query-engine failure can still come back
+// as HTTP 200 with Status "error" and an empty/absent Results, which would
+// otherwise silently parse as a valid answer of 0 - indistinguishable from
+// a metric that genuinely has no samples. scalar() treats that as an
+// error rather than a zero.
+//
+// A data row is not guaranteed to be all-float: a query with an "le"
+// filter (a latency_threshold SLI's bucket query) still comes back with
+// "le" as its own "group"-typed column alongside the "aggregation" column
+// - SigNoz keeps histogram bucket boundaries as an explicit group even
+// when the filter pins it to one value, confirmed live against a running
+// SigNoz instance (a query filtered to le='1000' still returned a row
+// shaped ["1000", <count>], not just [<count>]). Decoding Data as
+// [][]float64 fails outright the moment any row contains that group
+// value, so each cell is decoded individually and only "aggregation"-typed
+// columns are read as numbers.
 type scalarBuilderResponse struct {
-	Data struct {
+	Status string `json:"status"`
+	Data   struct {
 		Data struct {
 			Results []struct {
 				Columns []struct {
 					ColumnType string `json:"columnType"`
 				} `json:"columns"`
-				Data [][]float64 `json:"data"`
+				Data [][]json.RawMessage `json:"data"`
 			} `json:"results"`
 		} `json:"data"`
 	} `json:"data"`
 }
 
-func (r scalarBuilderResponse) scalar() float64 {
+func (r scalarBuilderResponse) scalar() (float64, error) {
+	if r.Status != "" && r.Status != "success" {
+		return 0, fmt.Errorf("SigNoz scalar builder query returned status %q", r.Status)
+	}
 	var sum float64
 	for _, result := range r.Data.Data.Results {
 		for _, row := range result.Data {
@@ -165,9 +189,13 @@ func (r scalarBuilderResponse) scalar() float64 {
 				if column.ColumnType != "aggregation" || i >= len(row) {
 					continue
 				}
-				sum += row[i]
+				var value float64
+				if err := json.Unmarshal(row[i], &value); err != nil {
+					return 0, fmt.Errorf("decode SigNoz scalar aggregation value: %w", err)
+				}
+				sum += value
 			}
 		}
 	}
-	return sum
+	return sum, nil
 }

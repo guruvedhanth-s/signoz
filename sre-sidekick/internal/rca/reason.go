@@ -16,6 +16,14 @@ import (
 type ModelDiagnosis struct {
 	RootCause   string
 	ProposedFix string
+	// EvidenceIDs cites the evidence (by ID, from the evidence passed to
+	// Reason) that supports RootCause - the same citation contract
+	// Candidates use. Render drops any id that does not resolve to
+	// evidence actually gathered for this diagnosis, exactly as it does
+	// for a Candidate's EvidenceIDs: RootCause is not exempt from having
+	// its claim checked against real evidence just because it is the
+	// top-level answer rather than one of several candidates.
+	EvidenceIDs []string
 	// Candidates is optional: a Reasoner can return ranked hypotheses
 	// instead of (or alongside) a single RootCause/ProposedFix. Render
 	// copies these through, dropping any EvidenceIDs that do not resolve

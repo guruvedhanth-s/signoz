@@ -3,6 +3,7 @@ package slo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
@@ -65,6 +66,12 @@ func (e *Engine) evaluate(ctx context.Context, cfg Config, definition Definition
 			dependencies = cfg.Completeness.ExpectedMetrics
 		}
 		serviceLabel, environmentLabel := cfg.MetricLabels()
+		if trimmed := strings.TrimSpace(definition.ServiceLabel); trimmed != "" {
+			serviceLabel = trimmed
+		}
+		if trimmed := strings.TrimSpace(definition.EnvironmentLabel); trimmed != "" {
+			environmentLabel = trimmed
+		}
 		gateResult, gateErr := e.Gate.Check(ctx, GateRequest{
 			Service:          cfg.Service,
 			Environment:      cfg.Environment,

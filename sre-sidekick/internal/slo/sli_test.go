@@ -1,6 +1,7 @@
 package slo
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
@@ -30,6 +31,72 @@ func TestDeriveMetricQueriesScopesRatioByServiceAndEnvironment(t *testing.T) {
 	}
 }
 
+// TestDeriveMetricQueriesDefinitionLabelOverridesWinOverConfigDefaults
+// locks in a per-Definition ServiceLabel/EnvironmentLabel override taking
+// priority over cfg.MetricLabels() - live-verified necessary because a
+// single Config commonly mixes custom-instrumented counters (attribute
+// keys like "service_name"/"environment") with SigNoz's own
+// spanmetrics-derived metrics (OTel resource semantic-convention keys
+// "service.name"/"deployment.environment" instead): a Config-wide default
+// cannot serve both within the same file.
+func TestDeriveMetricQueriesDefinitionLabelOverridesWinOverConfigDefaults(t *testing.T) {
+	cfg := Config{Service: "support-agent", Environment: "local"}
+	definition := Definition{
+		Name: "span-latency", Type: SLITypeLatencyThreshold, Window: "1h",
+		LatencyMetric: "signoz_latency", ThresholdMS: 1000,
+		ServiceLabel: "service.name", EnvironmentLabel: "deployment.environment",
+	}
+	good, total, err := deriveMetricQueries(cfg, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTotalFilter := `service.name = 'support-agent' AND deployment.environment = 'local'`
+	if total.Filter != wantTotalFilter {
+		t.Fatalf("total filter = %q, want the per-definition label override, not the config-wide default", total.Filter)
+	}
+	if !strings.Contains(good.Filter, wantTotalFilter) {
+		t.Fatalf("good filter = %q, want it to also use the per-definition label override", good.Filter)
+	}
+}
+
+// TestDeriveMetricQueriesUsesDeltaTemporalityWhenConfigured locks in the
+// fix for a bug where every counter query hardcoded Cumulative
+// temporality: SigNoz's own spanmetrics-processor-derived metrics
+// (signoz_latency.bucket/.count) are Delta temporality - confirmed live,
+// an "increase" aggregation against a Delta metric queried as Cumulative
+// returned an empty result set (silent no-data), not an error.
+func TestDeriveMetricQueriesUsesDeltaTemporalityWhenConfigured(t *testing.T) {
+	cfg := Config{Service: "support-agent", Environment: "local"}
+	definition := Definition{
+		Name: "span-latency", Type: SLITypeLatencyThreshold, Window: "1h",
+		LatencyMetric: "signoz_latency", ThresholdMS: 1000, MetricTemporality: "delta",
+	}
+	good, total, err := deriveMetricQueries(cfg, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Temporality != "Delta" || total.Temporality != "Delta" {
+		t.Fatalf("Temporality = %q/%q, want Delta for both queries", good.Temporality, total.Temporality)
+	}
+}
+
+// TestDeriveMetricQueriesDefaultsToCumulativeTemporality preserves today's
+// behavior when MetricTemporality is left unset.
+func TestDeriveMetricQueriesDefaultsToCumulativeTemporality(t *testing.T) {
+	cfg := Config{Service: "support-agent", Environment: "local"}
+	definition := Definition{
+		Name: "grounded-answers", Type: SLITypeGroundedAnswers, Window: "1h",
+		GoodMetric: "agent_grounded_answers_total", TotalMetric: "agent_evaluated_answers_total",
+	}
+	good, total, err := deriveMetricQueries(cfg, definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Temporality != "Cumulative" || total.Temporality != "Cumulative" {
+		t.Fatalf("Temporality = %q/%q, want Cumulative by default", good.Temporality, total.Temporality)
+	}
+}
+
 func TestDeriveMetricQueriesUsesConfiguredLabelsForCompleteness(t *testing.T) {
 	cfg := Config{
 		Service: "checkout-api", Environment: "test",
@@ -49,6 +116,17 @@ func TestDeriveMetricQueriesUsesConfiguredLabelsForCompleteness(t *testing.T) {
 	}
 }
 
+// TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries locks in the
+// default bucket unit, "ms": live-verified against a running SigNoz
+// instance that SigNoz's own zero-instrumentation latency histogram
+// (spanmetrics-processor "signoz_latency") stores "le" boundaries in
+// milliseconds (0.1, 1, 2, 6, 10, 50, 100, 250, 500, 1000, 1400, 2000,
+// 5000, 10000, 20000, 40000, 60000, +Inf - a 60000 boundary only makes
+// sense as 60 seconds in ms). Previously the code always divided
+// ThresholdMS by 1000 (assuming seconds unconditionally): a 1000ms
+// threshold queried le='1', which live-matched a real bucket - the "<=1ms"
+// one - not the intended "<=1000ms" bucket, so the query never errored but
+// silently computed the SLI against the wrong, far stricter cutoff.
 func TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries(t *testing.T) {
 	cfg := Config{Service: "checkout-api", Environment: "test"}
 	good, total, err := deriveMetricQueries(cfg, Definition{
@@ -61,9 +139,9 @@ func TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries(t *testing.T) {
 	if good.Metric != "request_duration_seconds_bucket" {
 		t.Fatalf("unexpected good metric: %q", good.Metric)
 	}
-	wantGoodFilter := `service_name = 'checkout-api' AND environment = 'test' AND le = '1'`
+	wantGoodFilter := `service_name = 'checkout-api' AND environment = 'test' AND le = '1000'`
 	if good.Filter != wantGoodFilter {
-		t.Fatalf("unexpected good filter: %q", good.Filter)
+		t.Fatalf("unexpected good filter: %q, want the threshold in milliseconds unconverted (default unit)", good.Filter)
 	}
 	if total.Metric != "request_duration_seconds_count" {
 		t.Fatalf("unexpected total metric: %q", total.Metric)
@@ -74,12 +152,80 @@ func TestDeriveMetricQueriesBuildsLatencyBucketAndCountQueries(t *testing.T) {
 	}
 }
 
+// TestDeriveMetricQueriesConvertsToSecondsWhenConfigured covers the "s"
+// unit for an OTel semantic-convention histogram (e.g. a custom
+// "*_duration_seconds" metric), which does store "le" in seconds.
+func TestDeriveMetricQueriesConvertsToSecondsWhenConfigured(t *testing.T) {
+	cfg := Config{Service: "checkout-api", Environment: "test"}
+	good, _, err := deriveMetricQueries(cfg, Definition{
+		Name: "latency", Type: SLITypeLatencyThreshold, Window: "30d",
+		LatencyMetric: "request_duration_seconds", ThresholdMS: 1000, LatencyBucketUnit: "s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGoodFilter := `service_name = 'checkout-api' AND environment = 'test' AND le = '1'`
+	if good.Filter != wantGoodFilter {
+		t.Fatalf("unexpected good filter: %q, want the threshold converted to seconds", good.Filter)
+	}
+}
+
 func TestDeriveMetricQueriesRejectsEmptyLatencyMetric(t *testing.T) {
 	cfg := Config{Service: "checkout-api", Environment: "test"}
 	if _, _, err := deriveMetricQueries(cfg, Definition{
 		Name: "latency", Type: SLITypeLatencyThreshold, Window: "1h", ThresholdMS: 1000,
 	}); err == nil {
 		t.Fatal("expected error for empty latency metric")
+	}
+}
+
+// TestDeriveMetricQueriesUsesExplicitBucketAndCountMetricOverrides locks in
+// the fix for SigNoz's own zero-instrumentation latency histogram, whose
+// child metrics are dot-separated (signoz_latency.bucket,
+// signoz_latency.count) rather than the OTel semantic-convention underscore
+// suffix (signoz_latency_bucket, signoz_latency_count) the code derives by
+// default - confirmed live: `go run ./cmd/reliability-agent slo` against
+// latency_metric: signoz_latency always returned indeterminate before this
+// fix, because the derived underscore names do not exist as metrics.
+func TestDeriveMetricQueriesUsesExplicitBucketAndCountMetricOverrides(t *testing.T) {
+	cfg := Config{Service: "support-agent", Environment: "local"}
+	good, total, err := deriveMetricQueries(cfg, Definition{
+		Name: "latency", Type: SLITypeLatencyThreshold, Window: "1h",
+		LatencyMetric:       "signoz_latency",
+		LatencyBucketMetric: "signoz_latency.bucket",
+		LatencyCountMetric:  "signoz_latency.count",
+		ThresholdMS:         1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Metric != "signoz_latency.bucket" {
+		t.Fatalf("good metric = %q, want the explicit override verbatim, not the derived underscore form", good.Metric)
+	}
+	if total.Metric != "signoz_latency.count" {
+		t.Fatalf("total metric = %q, want the explicit override verbatim, not the derived underscore form", total.Metric)
+	}
+}
+
+// TestDeriveMetricQueriesPartialOverrideLeavesOtherMetricDerived proves the
+// two override fields are independent: setting only one does not force the
+// other into anything but the default derived form.
+func TestDeriveMetricQueriesPartialOverrideLeavesOtherMetricDerived(t *testing.T) {
+	cfg := Config{Service: "support-agent", Environment: "local"}
+	good, total, err := deriveMetricQueries(cfg, Definition{
+		Name: "latency", Type: SLITypeLatencyThreshold, Window: "1h",
+		LatencyMetric:       "signoz_latency",
+		LatencyBucketMetric: "signoz_latency.bucket",
+		ThresholdMS:         1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Metric != "signoz_latency.bucket" {
+		t.Fatalf("good metric = %q, want the explicit override", good.Metric)
+	}
+	if total.Metric != "signoz_latency_count" {
+		t.Fatalf("total metric = %q, want the derived underscore form since latency_count_metric was left unset", total.Metric)
 	}
 }
 
