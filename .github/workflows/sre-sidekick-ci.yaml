@@ -39,7 +39,13 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test
-        run: go test ./... -race -cover
+        # -cover is deliberately omitted: `go test ./... -cover` invokes
+        # `go tool covdata` to merge results once any package in the set has
+        # no test files (internal/evidence, internal/registry,
+        # internal/source all have none today), and that tool is absent from
+        # this runner's Go toolchain install. Coverage isn't gated here, so
+        # plain -race is enough.
+        run: go test ./... -race
   fmt:
     runs-on: ubuntu-latest
     defaults:
