@@ -32,6 +32,7 @@ type Coordinator struct {
 	sessions *session.Manager
 	rca      RCA
 	verifier Verifier
+	actuator Actuator
 	logger   *slog.Logger
 	metrics  *Metrics
 
@@ -78,6 +79,17 @@ func WithCoordinatorVerifier(verifier Verifier) CoordinatorOption {
 	}
 }
 
+// WithCoordinatorActuator attaches the Act-stage adapter (PRD sections 15,
+// 18). Until attached, an approval is recorded but nothing is logged for
+// audit beyond the decision itself (NoopActuator).
+func WithCoordinatorActuator(actuator Actuator) CoordinatorOption {
+	return func(c *Coordinator) {
+		if actuator != nil {
+			c.actuator = actuator
+		}
+	}
+}
+
 // WithMaxConcurrentAnalysis caps concurrent RCA runs.
 func WithMaxConcurrentAnalysis(limit int) CoordinatorOption {
 	return func(c *Coordinator) {
@@ -120,6 +132,7 @@ func NewCoordinator(
 		sessions:           sessions,
 		rca:                rca,
 		verifier:           UnavailableVerifier{},
+		actuator:           NoopActuator{},
 		logger:             slog.Default(),
 		defaultEnvironment: "prod",
 		analysis:           make(chan struct{}, 5),
@@ -165,7 +178,7 @@ func (c *Coordinator) Announce(ctx context.Context, d notify.Diagnosis) (*sessio
 		return nil, fmt.Errorf("slack: open session: %w", err)
 	}
 	if !existing {
-		c.metrics.IncidentAnnounced(ctx, d.Service, string(statusOr(d.Status, notify.StatusDiagnosed)))
+		c.metrics.IncidentAnnounced(ctx, d.Service, d.Environment, string(statusOr(d.Status, notify.StatusDiagnosed)))
 		c.logger.Info("incident session opened",
 			"correlation_id", d.CorrelationID,
 			"service", d.Service,
@@ -234,7 +247,7 @@ func (c *Coordinator) decide(
 		detail = "Recorded as declined. No action will be taken."
 	}
 
-	c.metrics.DecisionRecorded(ctx, s.Service, string(kind))
+	c.metrics.DecisionRecorded(ctx, s.Service, s.Environment, string(kind))
 	c.logger.Info("decision recorded",
 		"correlation_id", s.CorrelationID,
 		"decision", string(kind),
@@ -242,6 +255,10 @@ func (c *Coordinator) decide(
 		"service", s.Service,
 		"thread_ts", s.ThreadTS,
 	)
+
+	if kind == session.DecisionApproved {
+		c.act(ctx, s)
+	}
 
 	notice := fmt.Sprintf("*%s by <@%s>* at %s", strings.ToUpper(verb[:1])+verb[1:], in.UserID,
 		existing.At.UTC().Format("2006-01-02 15:04:05 MST"))
@@ -253,6 +270,28 @@ func (c *Coordinator) decide(
 		c.retireButtons(ctx, s, in, notice)
 	}
 	c.postReply(ctx, in.ChannelID, in.ThreadTS, detail)
+}
+
+// act hands an approved proposal to the Actuator (PRD sections 15, 18) and
+// records the outcome. It runs automatically once approval is recorded -
+// there is no separate button, because approving *is* the human-in-the-loop
+// gate the Actuator is waiting for. A failure here is logged but never
+// surfaces as a decision failure: the decision itself already succeeded.
+func (c *Coordinator) act(ctx context.Context, s *session.Session) {
+	d := s.Diagnosis()
+	result, err := c.actuator.Act(ctx, ActionRequest{
+		CorrelationID: d.CorrelationID,
+		Service:       s.Service,
+		Environment:   s.Environment,
+		ProposedFix:   d.ProposedFix,
+		Reversible:    d.Reversible,
+	})
+	if err != nil {
+		c.logger.Error("actuator failed",
+			"correlation_id", s.CorrelationID, "service", s.Service, "error", err.Error())
+		return
+	}
+	c.metrics.ActionRecorded(ctx, s.Service, s.Environment, "advisory", result.Outcome)
 }
 
 // verify handles the "Verify recovery" button (PRD section 16): it
@@ -284,7 +323,7 @@ func (c *Coordinator) verify(ctx context.Context, s *session.Session, in Interac
 		return
 	}
 
-	c.metrics.VerifyChecked(ctx, s.Service, result.SLOState)
+	c.metrics.VerifyChecked(ctx, s.Service, s.Environment, result.SLOState)
 	c.logger.Info("verify checked",
 		"correlation_id", s.CorrelationID,
 		"service", s.Service,
@@ -323,7 +362,7 @@ func (c *Coordinator) closeSession(ctx context.Context, s *session.Session, in I
 		c.postReply(ctx, in.ChannelID, in.ThreadTS, "This session was already closed.")
 		return
 	}
-	c.metrics.DecisionRecorded(ctx, s.Service, "closed")
+	c.metrics.DecisionRecorded(ctx, s.Service, s.Environment, "closed")
 	c.logger.Info("session closed",
 		"correlation_id", s.CorrelationID, "user", in.UserID, "thread_ts", s.ThreadTS)
 
@@ -429,7 +468,7 @@ func (c *Coordinator) OnMessage(ctx context.Context, msg Message) {
 
 	answer, err := c.answer(ctx, request)
 	if err != nil {
-		c.metrics.FollowupRecorded(ctx, found.Service, followupOutcome(err))
+		c.metrics.FollowupRecorded(ctx, found.Service, found.Environment, followupOutcome(err))
 		if errors.Is(err, ErrRCAUnavailable) {
 			c.reply(ctx, found,
 				"The analysis engine is not connected, so I cannot answer follow-up questions yet. "+
@@ -447,7 +486,7 @@ func (c *Coordinator) OnMessage(ctx context.Context, msg Message) {
 		return
 	}
 
-	c.metrics.FollowupRecorded(ctx, found.Service, FollowupAnswered)
+	c.metrics.FollowupRecorded(ctx, found.Service, found.Environment, FollowupAnswered)
 	if err := c.sessions.AppendTurn(found, session.Turn{
 		Actor: session.ActorSidekick,
 		Text:  answer,
@@ -584,7 +623,7 @@ func (c *Coordinator) OnCommand(ctx context.Context, cmd Command) {
 // that calls this belongs to the server's lifecycle, not here.
 func (c *Coordinator) ReapIdle(ctx context.Context) {
 	for _, expired := range c.sessions.ReapIdle() {
-		c.metrics.DecisionRecorded(ctx, expired.Service, "expired")
+		c.metrics.DecisionRecorded(ctx, expired.Service, expired.Environment, "expired")
 		c.logger.Info("session expired",
 			"correlation_id", expired.CorrelationID, "thread_ts", expired.ThreadTS)
 		c.postReply(ctx, expired.ChannelID, expired.ThreadTS,

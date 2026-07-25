@@ -20,6 +20,7 @@ type Metrics struct {
 	notifyFailures metric.Int64Counter
 	followups      metric.Int64Counter
 	verifyChecks   metric.Int64Counter
+	actions        metric.Int64Counter
 }
 
 // Metric names are effectively a public API: dashboards and alerts hardcode
@@ -30,8 +31,11 @@ const (
 	// MetricIncidents counts incidents announced to on-call, by service and
 	// status. Named by PRD section 17.
 	MetricIncidents = "sidekick_incidents"
-	// MetricDecisions counts terminal outcomes: approved, declined, closed or
-	// expired.
+	// MetricDecisions counts terminal outcomes recorded by a human on an
+	// incident conversation: approved, declined, closed or expired. This is
+	// distinct from MetricActions: a decision is what a human recorded in
+	// Slack, an action is what the Actuator itself did (or, in the
+	// advisory MVP, recorded as proposed) with it.
 	MetricDecisions = "sidekick_decisions"
 	// MetricSessionsActive tracks how many incident conversations are open. A
 	// value that climbs and never falls is a session leak.
@@ -45,6 +49,12 @@ const (
 	// MetricVerifyChecks counts verify-stage SLO re-evaluations (PRD
 	// section 16), by service and the re-evaluated SLO state.
 	MetricVerifyChecks = "sidekick_verify_checks"
+	// MetricActions is PRD section 17's sidekick_actions{service,
+	// environment, action, outcome}: what an Actuator did with an approved
+	// proposal. In the advisory MVP every outcome is "recorded" - the
+	// Actuator executes nothing - but the metric exists now so a future
+	// executing adapter (KEDA, config patch/PR) needs no new metric name.
+	MetricActions = "sidekick_actions"
 )
 
 // Outcomes recorded on MetricFollowups.
@@ -98,6 +108,11 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	actions, err := meter.Int64Counter(MetricActions,
+		metric.WithDescription("What an Actuator did with an approved proposal, by service, environment, action and outcome"))
+	if err != nil {
+		return nil, err
+	}
 
 	return &Metrics{
 		incidents:      incidents,
@@ -106,16 +121,18 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		notifyFailures: notifyFailures,
 		followups:      followups,
 		verifyChecks:   verifyChecks,
+		actions:        actions,
 	}, nil
 }
 
 // IncidentAnnounced records a new incident conversation.
-func (m *Metrics) IncidentAnnounced(ctx context.Context, service, status string) {
+func (m *Metrics) IncidentAnnounced(ctx context.Context, service, environment, status string) {
 	if m == nil || m.incidents == nil {
 		return
 	}
 	m.incidents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("service", service),
+		attribute.String("environment", environment),
 		attribute.String("status", status),
 	))
 	if m.sessionsActive != nil {
@@ -125,12 +142,13 @@ func (m *Metrics) IncidentAnnounced(ctx context.Context, service, status string)
 
 // DecisionRecorded records a terminal outcome and closes out the session
 // gauge.
-func (m *Metrics) DecisionRecorded(ctx context.Context, service, decision string) {
+func (m *Metrics) DecisionRecorded(ctx context.Context, service, environment, decision string) {
 	if m == nil || m.decisions == nil {
 		return
 	}
 	m.decisions.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("service", service),
+		attribute.String("environment", environment),
 		attribute.String("decision", decision),
 	))
 	if m.sessionsActive != nil {
@@ -139,24 +157,42 @@ func (m *Metrics) DecisionRecorded(ctx context.Context, service, decision string
 }
 
 // FollowupRecorded records the outcome of one follow-up question.
-func (m *Metrics) FollowupRecorded(ctx context.Context, service, outcome string) {
+func (m *Metrics) FollowupRecorded(ctx context.Context, service, environment, outcome string) {
 	if m == nil || m.followups == nil {
 		return
 	}
 	m.followups.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("service", service),
+		attribute.String("environment", environment),
 		attribute.String("outcome", outcome),
 	))
 }
 
 // VerifyChecked records one verify-stage SLO re-evaluation.
-func (m *Metrics) VerifyChecked(ctx context.Context, service, sloState string) {
+func (m *Metrics) VerifyChecked(ctx context.Context, service, environment, sloState string) {
 	if m == nil || m.verifyChecks == nil {
 		return
 	}
 	m.verifyChecks.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("service", service),
+		attribute.String("environment", environment),
 		attribute.String("slo_state", sloState),
+	))
+}
+
+// ActionRecorded records what an Actuator did with an approved proposal
+// (PRD section 17's sidekick_actions). In the advisory MVP, outcome is
+// always act.OutcomeRecorded - nothing executes - but the metric's shape
+// does not change when an executing adapter is added later.
+func (m *Metrics) ActionRecorded(ctx context.Context, service, environment, action, outcome string) {
+	if m == nil || m.actions == nil {
+		return
+	}
+	m.actions.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("service", service),
+		attribute.String("environment", environment),
+		attribute.String("action", action),
+		attribute.String("outcome", outcome),
 	))
 }
 
