@@ -43,6 +43,11 @@ const (
 	// ActionClose ends the session. This is the button that replaces a
 	// thread-blind `/end` slash command (session design section 2.1).
 	ActionClose = "sidekick_close"
+	// ActionVerify re-evaluates the SLO and reports recovery (PRD section
+	// 16). Offered only after an approval, once a human has had the chance
+	// to actually apply the fix by hand; clicking it again re-checks, so it
+	// is deliberately never retired the way Approve/Decline are.
+	ActionVerify = "sidekick_verify"
 )
 
 // MaxEvidenceItems caps how many evidence entries are rendered. Slack rejects
@@ -237,6 +242,17 @@ func ResolvedBlocks(blocks []slack.Block, notice string) []slack.Block {
 		resolved = append(resolved, block)
 	}
 	return append(resolved, slack.NewSectionBlock(markdownText(notice), nil, nil))
+}
+
+// ResolvedBlocksWithVerify is ResolvedBlocks plus a "Verify recovery"
+// button (PRD section 16), for the one outcome - approved - where there is
+// something to go verify. It is deliberately not retired by a click the
+// way Approve/Decline are: recovery takes time, so the same button stays
+// clickable for a re-check.
+func ResolvedBlocksWithVerify(blocks []slack.Block, notice, correlationID string) []slack.Block {
+	resolved := ResolvedBlocks(blocks, notice)
+	verify := slack.NewButtonBlockElement(ActionVerify, correlationID, plainText("Verify recovery"))
+	return append(resolved, slack.NewActionBlock("sidekick_verify_actions", verify))
 }
 
 const irreversibleMarker = ":warning: *irreversible*"
