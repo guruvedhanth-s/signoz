@@ -12,21 +12,39 @@ import (
 
 var ErrNoData = errors.New("no data in SLO window")
 
-func evaluateSLI(ctx context.Context, querier source.MetricQuerier, cfg Config, definition Definition, start, end uint64) (float64, error) {
+// scalarWithWarning is ScalarBuilder plus, when querier also implements
+// source.WarningQuerier, SigNoz's own top-level query-completeness
+// warning for the same read (PRD section 11.2). A querier that doesn't
+// implement it (an in-memory or test double) behaves exactly as before -
+// this is purely additive.
+func scalarWithWarning(ctx context.Context, querier source.MetricQuerier, query source.MetricQuery, start, end uint64) (float64, string, error) {
+	if warned, ok := querier.(source.WarningQuerier); ok {
+		return warned.ScalarBuilderWarning(ctx, query, start, end)
+	}
+	value, err := querier.ScalarBuilder(ctx, query, start, end)
+	return value, "", err
+}
+
+// evaluateSLI returns the SLI value and, when SigNoz raised one, a
+// non-fatal completeness warning collected from either the total or the
+// good query (PRD section 11.2) - a warning does not fail the query, the
+// same way TimeSeriesValue.Partial doesn't; it is surfaced so a caller can
+// decide whether to treat this window's answer with less confidence.
+func evaluateSLI(ctx context.Context, querier source.MetricQuerier, cfg Config, definition Definition, start, end uint64) (float64, string, error) {
 	goodQuery, totalQuery, err := deriveMetricQueries(cfg, definition)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	total, err := querier.ScalarBuilder(ctx, totalQuery, start, end)
+	total, totalWarning, err := scalarWithWarning(ctx, querier, totalQuery, start, end)
 	if err != nil {
-		return 0, fmt.Errorf("total query: %w", err)
+		return 0, "", fmt.Errorf("total query: %w", err)
 	}
 	if total <= 0 {
-		return 0, ErrNoData
+		return 0, totalWarning, ErrNoData
 	}
-	good, err := querier.ScalarBuilder(ctx, goodQuery, start, end)
+	good, goodWarning, err := scalarWithWarning(ctx, querier, goodQuery, start, end)
 	if err != nil {
-		return 0, fmt.Errorf("good query: %w", err)
+		return 0, totalWarning, fmt.Errorf("good query: %w", err)
 	}
 	if good < 0 {
 		good = 0
@@ -34,7 +52,13 @@ func evaluateSLI(ctx context.Context, querier source.MetricQuerier, cfg Config, 
 	if good > total {
 		good = total
 	}
-	return good / total, nil
+	warning := totalWarning
+	if warning == "" {
+		warning = goodWarning
+	} else if goodWarning != "" && goodWarning != warning {
+		warning += "; " + goodWarning
+	}
+	return good / total, warning, nil
 }
 
 // deriveMetricQueries builds the good/total builder queries for a
@@ -55,7 +79,7 @@ func deriveMetricQueries(cfg Config, definition Definition) (source.MetricQuery,
 	filter := scopeExpression(cfg.Service, cfg.Environment, serviceLabel, environmentLabel)
 	temporality := metricTemporality(definition)
 	switch definition.Type {
-	case SLITypeRatio, SLITypeCompleteness, SLITypeGroundedAnswers:
+	case SLITypeRatio, SLITypeGroundedAnswers:
 		return counterQuery(definition.GoodMetric, filter, temporality), counterQuery(definition.TotalMetric, filter, temporality), nil
 	case SLITypeLatencyThreshold:
 		metric := strings.TrimSpace(definition.LatencyMetric)

@@ -97,13 +97,20 @@ func TestDeriveMetricQueriesDefaultsToCumulativeTemporality(t *testing.T) {
 	}
 }
 
-func TestDeriveMetricQueriesUsesConfiguredLabelsForCompleteness(t *testing.T) {
+// grounded_answers shares deriveMetricQueries with ratio - a good/total
+// counter ratio is the right math for "fraction of answers that were
+// grounded", so it is deliberately not given separate query-building logic.
+// completeness is the one SLI type with genuinely different math - see
+// TestEvaluateCompleteness* in engine_test.go - so it is no longer part of
+// this switch at all (config.Validate no longer requires good_metric/
+// total_metric for it either).
+func TestDeriveMetricQueriesUsesConfiguredLabelsForGroundedAnswers(t *testing.T) {
 	cfg := Config{
 		Service: "checkout-api", Environment: "test",
 		Completeness: &CompletenessConfig{ServiceLabel: "svc", EnvironmentLabel: "env"},
 	}
 	definition := Definition{
-		Name: "success", Type: SLITypeCompleteness, Window: "1h",
+		Name: "success", Type: SLITypeGroundedAnswers, Window: "1h",
 		GoodMetric: "good_total", TotalMetric: "total_total",
 	}
 	good, total, err := deriveMetricQueries(cfg, definition)
@@ -112,7 +119,16 @@ func TestDeriveMetricQueriesUsesConfiguredLabelsForCompleteness(t *testing.T) {
 	}
 	wantFilter := `svc = 'checkout-api' AND env = 'test'`
 	if good.Filter != wantFilter || total.Filter != wantFilter {
-		t.Fatalf("completeness queries did not use configured labels: good=%+v total=%+v", good, total)
+		t.Fatalf("grounded_answers queries did not use configured labels: good=%+v total=%+v", good, total)
+	}
+}
+
+func TestDeriveMetricQueries_CompletenessIsUnsupported(t *testing.T) {
+	_, _, err := deriveMetricQueries(Config{Service: "x", Environment: "y"}, Definition{
+		Name: "coverage", Type: SLITypeCompleteness, Window: "1h",
+	})
+	if err == nil {
+		t.Fatal("deriveMetricQueries(completeness) error = nil, want an error - Engine never calls this for completeness (see evaluateCompleteness)")
 	}
 }
 

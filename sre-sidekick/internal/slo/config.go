@@ -135,7 +135,12 @@ func (c Config) Validate() error {
 		if err := definition.Validate(); err != nil {
 			return fmt.Errorf("slos[%d]: %w", i, err)
 		}
-		if definition.RequiresCompleteness &&
+		// A completeness-type SLI *is* a coverage measurement (see
+		// evaluateCompleteness in engine.go), so it needs dependencies to
+		// measure the presence of exactly the way RequiresCompleteness's
+		// gate check does - independent of whether RequiresCompleteness
+		// itself is also set.
+		if (definition.RequiresCompleteness || definition.Type == SLITypeCompleteness) &&
 			len(definition.Dependencies) == 0 &&
 			(c.Completeness == nil || len(c.Completeness.ExpectedMetrics) == 0) {
 			return fmt.Errorf(
@@ -176,10 +181,16 @@ func (d Definition) Validate() error {
 		return fmt.Errorf("metric_temporality must be \"cumulative\" or \"delta\", got %q", d.MetricTemporality)
 	}
 	switch d.Type {
-	case SLITypeRatio, SLITypeCompleteness, SLITypeGroundedAnswers:
+	case SLITypeRatio, SLITypeGroundedAnswers:
 		if strings.TrimSpace(d.GoodMetric) == "" || strings.TrimSpace(d.TotalMetric) == "" {
 			return fmt.Errorf("%s requires good_metric and total_metric", d.Type)
 		}
+	case SLITypeCompleteness:
+		// No good_metric/total_metric: a completeness SLI's value is the
+		// dependency-coverage fraction itself (see evaluateCompleteness in
+		// engine.go), not a counter ratio. Its dependencies are validated
+		// in Config.Validate, where completeness.expected_metrics is also
+		// in scope.
 	case SLITypeLatencyThreshold:
 		if strings.TrimSpace(d.LatencyMetric) == "" || d.ThresholdMS <= 0 {
 			return fmt.Errorf("latency_threshold requires latency_metric and positive threshold_ms")
