@@ -577,5 +577,5 @@ with `connections:write`, subscribe to `message.channels` (and
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
 | — | 4 | `2d01cc7` | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
-| — | 5 | pending | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
+| — | 5 | `9435ddc` | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
 | — | 3 | `a7daef5` | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
