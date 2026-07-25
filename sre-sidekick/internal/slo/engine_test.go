@@ -6,20 +6,26 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
 )
 
-type fakeScalar struct {
+// fakeMetrics is keyed by MetricQuery.Metric rather than a full query
+// string: since the engine always derives the builder filter from
+// cfg.Service/cfg.Environment, the metric name alone is enough to
+// distinguish "good" from "total" reads in these tests.
+type fakeMetrics struct {
 	Values map[string]float64
 	Errors map[string]error
 }
 
-func (f fakeScalar) Scalar(_ context.Context, expression string, _, _ uint64) (float64, error) {
-	if err := f.Errors[expression]; err != nil {
+func (f fakeMetrics) ScalarBuilder(_ context.Context, query source.MetricQuery, _, _ uint64) (float64, error) {
+	if err := f.Errors[query.Metric]; err != nil {
 		return 0, err
 	}
-	value, ok := f.Values[expression]
+	value, ok := f.Values[query.Metric]
 	if !ok {
-		return 0, errors.New("missing fake query: " + expression)
+		return 0, errors.New("missing fake metric: " + query.Metric)
 	}
 	return value, nil
 }
@@ -33,14 +39,12 @@ func (f fakeGate) Check(context.Context, GateRequest) (GateResult, error) {
 }
 
 func TestEngineHealthyAndUnhealthy(t *testing.T) {
-	goodQuery := `increase(good_total{service_name="checkout-api",environment="test"}[1h])`
-	totalQuery := `increase(request_total{service_name="checkout-api",environment="test"}[1h])`
-	query := fakeScalar{Values: map[string]float64{goodQuery: 995, totalQuery: 1000}}
-	engine := NewEngine(query, nil)
+	metrics := fakeMetrics{Values: map[string]float64{"good": 995, "total": 1000}}
+	engine := NewEngine(metrics, nil)
 	engine.Now = func() time.Time { return time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC) }
 	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
 		Name: "success", Type: SLITypeRatio, Target: 0.995, Window: "1h",
-		GoodQuery: goodQuery, TotalQuery: totalQuery,
+		GoodMetric: "good", TotalMetric: "total",
 	}}}
 	reports, err := engine.Evaluate(context.Background(), cfg, time.Time{})
 	if err != nil {
@@ -50,7 +54,7 @@ func TestEngineHealthyAndUnhealthy(t *testing.T) {
 		t.Fatalf("unexpected healthy report: %+v", reports[0])
 	}
 
-	query.Values[goodQuery] = 800
+	metrics.Values["good"] = 800
 	reports, err = engine.Evaluate(context.Background(), cfg, time.Time{})
 	if err != nil {
 		t.Fatal(err)
@@ -61,15 +65,13 @@ func TestEngineHealthyAndUnhealthy(t *testing.T) {
 }
 
 func TestEngineCompletenessFailureIsIndeterminate(t *testing.T) {
-	goodQuery := `increase(good_total{service_name="checkout-api",environment="test"}[1h])`
-	totalQuery := `increase(request_total{service_name="checkout-api",environment="test"}[1h])`
-	query := fakeScalar{Values: map[string]float64{goodQuery: 995, totalQuery: 1000}}
-	engine := NewEngine(query, fakeGate{Result: GateResult{
+	metrics := fakeMetrics{Values: map[string]float64{"good": 995, "total": 1000}}
+	engine := NewEngine(metrics, fakeGate{Result: GateResult{
 		Coverage: 0.5, QueryComplete: true, Trusted: false, Reason: "missing dependency",
 	}})
 	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
 		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
-		GoodQuery: goodQuery, TotalQuery: totalQuery, RequiresCompleteness: true,
+		GoodMetric: "good", TotalMetric: "total", RequiresCompleteness: true,
 		Dependencies: []string{"requests"},
 	}}}
 	reports, err := engine.Evaluate(context.Background(), cfg, time.Now())
@@ -81,13 +83,51 @@ func TestEngineCompletenessFailureIsIndeterminate(t *testing.T) {
 	}
 }
 
+// capturingGate records the GateRequest it was called with, for asserting
+// what the engine forwarded to it.
+type capturingGate struct {
+	Result  GateResult
+	Request GateRequest
+}
+
+func (g *capturingGate) Check(_ context.Context, request GateRequest) (GateResult, error) {
+	g.Request = request
+	return g.Result, nil
+}
+
+// TestEngineForwardsDefinitionLabelOverridesToGate locks in a
+// per-Definition ServiceLabel/EnvironmentLabel override reaching the
+// completeness gate, not just the SLI query - live-verified necessary
+// because a Config commonly mixes custom-instrumented counters
+// ("service_name"/"environment") with SigNoz's own spanmetrics-derived
+// metrics (OTel resource semantic-convention keys "service.name"/
+// "deployment.environment" instead), and a definition requiring
+// completeness on the latter needs the gate scoped the same way the SLI
+// query is.
+func TestEngineForwardsDefinitionLabelOverridesToGate(t *testing.T) {
+	gate := &capturingGate{Result: GateResult{Coverage: 1, QueryComplete: true}}
+	engine := NewEngine(fakeMetrics{Values: map[string]float64{"good": 5, "total": 10}}, gate)
+	cfg := Config{Service: "support-agent", Environment: "local", SLOs: []Definition{{
+		Name: "span-latency", Type: SLITypeRatio, Target: 0.5, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total", RequiresCompleteness: true,
+		Dependencies:     []string{"signoz_latency"},
+		ServiceLabel:     "service.name",
+		EnvironmentLabel: "deployment.environment",
+	}}}
+	if _, err := engine.Evaluate(context.Background(), cfg, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if gate.Request.ServiceLabel != "service.name" || gate.Request.EnvironmentLabel != "deployment.environment" {
+		t.Fatalf("gate request labels = %q/%q, want the per-definition override",
+			gate.Request.ServiceLabel, gate.Request.EnvironmentLabel)
+	}
+}
+
 func TestEngineNoDataIsIndeterminate(t *testing.T) {
-	goodQuery := `increase(good_total{service_name="checkout-api",environment="test"}[1h])`
-	totalQuery := `increase(request_total{service_name="checkout-api",environment="test"}[1h])`
-	engine := NewEngine(fakeScalar{Values: map[string]float64{totalQuery: 0}}, nil)
+	engine := NewEngine(fakeMetrics{Values: map[string]float64{"total": 0}}, nil)
 	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
 		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
-		GoodQuery: goodQuery, TotalQuery: totalQuery,
+		GoodMetric: "good", TotalMetric: "total",
 	}}}
 	reports, err := engine.Evaluate(context.Background(), cfg, time.Now())
 	if err != nil {
@@ -99,15 +139,13 @@ func TestEngineNoDataIsIndeterminate(t *testing.T) {
 }
 
 func TestEngineOwnsCompletenessThresholdPolicy(t *testing.T) {
-	goodQuery := `increase(good_total{service_name="checkout-api",environment="test"}[1h])`
-	totalQuery := `increase(request_total{service_name="checkout-api",environment="test"}[1h])`
 	engine := NewEngine(
-		fakeScalar{Values: map[string]float64{goodQuery: 99, totalQuery: 100}},
+		fakeMetrics{Values: map[string]float64{"good": 99, "total": 100}},
 		fakeGate{Result: GateResult{Coverage: 0.5, QueryComplete: true}},
 	)
 	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
 		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
-		GoodQuery: goodQuery, TotalQuery: totalQuery, RequiresCompleteness: true,
+		GoodMetric: "good", TotalMetric: "total", RequiresCompleteness: true,
 		CompletenessThreshold: 0.5, Dependencies: []string{"requests"},
 	}}}
 

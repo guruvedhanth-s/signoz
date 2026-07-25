@@ -1,0 +1,45 @@
+# sidekick.yaml configures the RCA agent's presentation rule engine
+# (PRD section 13.4, internal/rca/presentation.go). These thresholds
+# decide, deterministically, whether a diagnosis is shown as a single
+# conclusion, ranked hypotheses, or "could not determine" - never the
+# model's own confidence.
+#
+# Every field is optional; a field left out (or the whole file missing)
+# falls back to the built-in default shown as a comment next to it (see
+# DefaultPresentationConfig in internal/rca/presentation.go).
+
+# min_error_samples is the fewest error evidence records (trace/log
+# evidence gathered for the incident) required before the rules will
+# attempt any presentation beyond "could not determine". Too few samples
+# cannot be trusted to reveal a real pattern, however concentrated they
+# look.
+min_error_samples: 3
+
+# concentration_threshold is the minimum share (0..1) of error evidence
+# that must cluster around one operation (span name) or one classified
+# exception signature (e.g. TimeoutError) for the "errors" golden signal
+# to be considered supported. 0.6 means at least 60% of the error evidence
+# - or of the subset whose message could be classified into a known
+# exception signature - must share the same operation or signature.
+concentration_threshold: 0.6
+
+# latency_shift_threshold is the minimum ratio of failing-request p99
+# duration to successful-request p99 duration (both measured over the
+# incident window) for the "latency" golden signal to be considered
+# supported. 1.5 means failing requests must run at least 50% longer than
+# successful ones - e.g. requests timing out well past the service's
+# normal response time.
+latency_shift_threshold: 1.5
+
+# error_rate_delta_threshold is the minimum increase in error rate
+# (errors/sec) over the immediately preceding window, of equal length,
+# that also counts toward the "errors" golden signal being supported
+# (alongside concentration, not instead of it).
+error_rate_delta_threshold: 0.5
+
+# golden_signals_for_conclusion is how many distinct golden-signal
+# categories (errors, latency, saturation) must be supported before a
+# diagnosis is presented as a single conclusion rather than ranked
+# hypotheses. PRD 13.4's example - "an errors spike concentrated in one
+# dependency span PLUS a latency shift" - is exactly 2, the default.
+golden_signals_for_conclusion: 2

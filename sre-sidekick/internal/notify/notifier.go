@@ -114,6 +114,11 @@ type Diagnosis struct {
 	// ID) and must not invent metrics or services (PRD section 13.2).
 	RootCause   string `json:"rootCause,omitempty"`
 	ProposedFix string `json:"proposedFix,omitempty"`
+	// EvidenceIDs cites the Evidence entries (by ID) that support
+	// RootCause, the same way each Candidate cites its own EvidenceIDs. An
+	// id the model cited that does not resolve to an Evidence entry is
+	// dropped, never invented or left unresolved (PRD section 13.3).
+	EvidenceIDs []string `json:"evidenceIds,omitempty"`
 	// Reversible flags whether ProposedFix is a reversible action; PRD
 	// section 15 requires irreversible actions to be labeled and to demand
 	// stronger confirmation.
