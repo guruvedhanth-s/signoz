@@ -1,7 +1,6 @@
 package rca
 
 import (
-	"os"
 	"testing"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
@@ -288,53 +287,17 @@ func TestPresent_CouldNotDetermine_SuppressesModelRootCause(t *testing.T) {
 	}
 }
 
-func TestLoadPresentationConfig_MissingFile_ReturnsDefaults(t *testing.T) {
-	got, err := LoadPresentationConfig("/nonexistent/sidekick.yaml")
-	if err != nil {
-		t.Fatalf("LoadPresentationConfig: %v", err)
-	}
-	if got != DefaultPresentationConfig() {
-		t.Errorf("got %+v, want defaults %+v", got, DefaultPresentationConfig())
-	}
-}
-
-func TestLoadPresentationConfig_EmptyPath_ReturnsDefaults(t *testing.T) {
-	got, err := LoadPresentationConfig("")
-	if err != nil {
-		t.Fatalf("LoadPresentationConfig: %v", err)
-	}
-	if got != DefaultPresentationConfig() {
-		t.Errorf("got %+v, want defaults %+v", got, DefaultPresentationConfig())
-	}
-}
-
-func TestLoadPresentationConfig_PartialOverride_FillsRestFromDefaults(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/sidekick.yaml"
-	if err := os.WriteFile(path, []byte("min_error_samples: 10\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := LoadPresentationConfig(path)
-	if err != nil {
-		t.Fatalf("LoadPresentationConfig: %v", err)
-	}
+// Loading sidekick.yaml (including the presentation: section) is
+// internal/config's job now (PRD section 18: one file, one schema, one
+// loader) - see internal/config's own tests for the load/defaulting
+// behavior. This package only tests WithDefaults itself.
+func TestPresentationConfig_WithDefaults_FillsOnlyZeroFields(t *testing.T) {
+	cfg := PresentationConfig{MinErrorSamples: 10}
+	got := cfg.WithDefaults()
 	if got.MinErrorSamples != 10 {
-		t.Errorf("MinErrorSamples = %d, want 10", got.MinErrorSamples)
+		t.Errorf("MinErrorSamples = %d, want the explicit override preserved", got.MinErrorSamples)
 	}
 	if got.ConcentrationThreshold != DefaultPresentationConfig().ConcentrationThreshold {
-		t.Errorf("ConcentrationThreshold = %v, want the default (unset in the file)", got.ConcentrationThreshold)
-	}
-}
-
-func TestLoadPresentationConfig_InvalidYAML_Errors(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/sidekick.yaml"
-	if err := os.WriteFile(path, []byte("min_error_samples: [this is not a number\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := LoadPresentationConfig(path); err == nil {
-		t.Fatal("expected an error for invalid YAML, got nil")
+		t.Errorf("ConcentrationThreshold = %v, want the default (unset by the caller)", got.ConcentrationThreshold)
 	}
 }

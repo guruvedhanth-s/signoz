@@ -28,11 +28,66 @@ const (
 	DefaultSessionTTL       = "30m"
 	DefaultMaxConcurrentRCA = 5
 	DefaultEnvironment      = "prod"
+
+	DefaultLLMProvider  = "openrouter"
+	DefaultLLMModel     = "deepseek/deepseek-chat"
+	DefaultLLMAPIKeyEnv = "OPENROUTER_API_KEY"
 )
 
-// Config is the root of `sidekick.yaml`.
+// Config is the root of `sidekick.yaml` (PRD section 18): one file covering
+// the Slack adapter, the RCA reasoner's LLM provider, and the section 13.4
+// presentation-rule thresholds. Earlier drafts of this project split these
+// across two files named `sidekick.yaml` with disjoint schemas and separate
+// loaders (`configs/sidekick.yaml` for Slack, a root `sidekick.yaml` for
+// presentation); that split is gone; this is the only sidekick.yaml.
 type Config struct {
 	Notify NotifyConfig `yaml:"notify" json:"notify"`
+	// LLM configures the provider driving the RCA reasoner (PRD section 21
+	// decision 3: OpenRouter/DeepSeek, kept swappable behind one interface).
+	LLM LLMConfig `yaml:"llm" json:"llm"`
+	// Presentation configures the section 13.4 rule engine deciding whether
+	// a diagnosis is shown as a conclusion, ranked hypotheses, or "could not
+	// determine". internal/rca only consumes this struct - converted to
+	// rca.PresentationConfig at the composition root (cmd/reliability-agent)
+	// - it does not load it from a file itself. Defined here rather than as
+	// an alias of rca.PresentationConfig because internal/notify/slack
+	// already imports this package, and internal/rca imports
+	// internal/notify/slack, so config importing rca would cycle. The field
+	// shapes are kept identical so the conversion is a plain type
+	// conversion, not a field-by-field copy.
+	Presentation PresentationConfig `yaml:"presentation" json:"presentation"`
+}
+
+// PresentationConfig mirrors rca.PresentationConfig field-for-field (see
+// the Presentation field's comment for why this isn't a direct type
+// reference). rca.PresentationConfig(cfg.Presentation) converts between
+// them - Go conversion between named struct types only requires identical
+// underlying fields (tags are ignored), which this satisfies by
+// construction.
+type PresentationConfig struct {
+	MinErrorSamples            int     `yaml:"min_error_samples" json:"min_error_samples,omitempty"`
+	ConcentrationThreshold     float64 `yaml:"concentration_threshold" json:"concentration_threshold,omitempty"`
+	LatencyShiftThreshold      float64 `yaml:"latency_shift_threshold" json:"latency_shift_threshold,omitempty"`
+	ErrorRateDeltaThreshold    float64 `yaml:"error_rate_delta_threshold" json:"error_rate_delta_threshold,omitempty"`
+	GoldenSignalsForConclusion int     `yaml:"golden_signals_for_conclusion" json:"golden_signals_for_conclusion,omitempty"`
+}
+
+// LLMConfig configures the LLM provider behind the RCA reasoner (PRD
+// section 21 decision 3). The API key itself is never stored here or in
+// YAML: APIKeyEnv only names the environment variable that holds it,
+// mirroring how SlackConfig handles the Slack tokens.
+type LLMConfig struct {
+	// Provider names the LLM provider. Only "openrouter" is supported today;
+	// this stays a named field (rather than being implied) so a future
+	// provider is a config change, not a code change.
+	Provider string `yaml:"provider" json:"provider"`
+	// Model is the provider's model slug, e.g. "deepseek/deepseek-chat".
+	Model string `yaml:"model" json:"model"`
+	// APIKeyEnv names the environment variable holding the provider API key.
+	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
+	// BaseURL overrides the provider's OpenAI-compatible chat-completions
+	// endpoint. Empty uses the provider's default.
+	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 }
 
 // NotifyConfig groups every outbound/inbound chat adapter. Only Slack exists
@@ -74,24 +129,51 @@ type SlackConfig struct {
 	MaxConcurrentRCA int `yaml:"max_concurrent_rca" json:"max_concurrent_rca"`
 }
 
-// Load reads, parses, defaults and validates the config file at path.
-// Unknown YAML fields are rejected so a typo in a key is a loud error rather
-// than a silently ignored setting.
+// Load reads, parses, defaults, and fully validates the config file at
+// path, including the Slack adapter's credentials. This is what `watch`
+// uses: it needs Slack.
+//
+// Unknown YAML fields are rejected so a typo in a key is a loud error
+// rather than a silently ignored setting.
 func Load(path string) (Config, error) {
+	return load(path, true)
+}
+
+// LoadForRCA reads, parses, defaults, and validates the config file at
+// path, but does not require the Slack adapter's credentials to be
+// configured or present. This is what `diagnose` uses: it is a one-shot
+// debug CLI that runs the RCA pipeline standalone and never touches Slack,
+// so requiring SLACK_BOT_TOKEN/SLACK_APP_TOKEN just to read the LLM and
+// presentation settings out of the same file would be a needless coupling.
+func LoadForRCA(path string) (Config, error) {
+	return load(path, false)
+}
+
+func load(path string, requireSlack bool) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read sidekick config %q: %w", path, err)
 	}
-	cfg, err := Parse(data)
+	cfg, err := parse(data, requireSlack)
 	if err != nil {
 		return Config{}, fmt.Errorf("sidekick config %q: %w", path, err)
 	}
 	return cfg, nil
 }
 
-// Parse is Load without the file read, so callers (and tests) can supply YAML
-// bytes directly.
+// Parse is Load without the file read, so callers (and tests) can supply
+// YAML bytes directly. It always validates Slack; use ParseForRCA to skip
+// that the same way LoadForRCA does.
 func Parse(data []byte) (Config, error) {
+	return parse(data, true)
+}
+
+// ParseForRCA is LoadForRCA without the file read.
+func ParseForRCA(data []byte) (Config, error) {
+	return parse(data, false)
+}
+
+func parse(data []byte, requireSlack bool) (Config, error) {
 	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
 	decoder.KnownFields(true)
 
@@ -100,7 +182,7 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("parse: %w", err)
 	}
 	cfg.applyDefaults()
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.validate(requireSlack); err != nil {
 		return Config{}, fmt.Errorf("validate: %w", err)
 	}
 	return cfg, nil
@@ -123,15 +205,46 @@ func (c *Config) applyDefaults() {
 	if slack.MaxConcurrentRCA == 0 {
 		slack.MaxConcurrentRCA = DefaultMaxConcurrentRCA
 	}
+
+	llm := &c.LLM
+	if strings.TrimSpace(llm.Provider) == "" {
+		llm.Provider = DefaultLLMProvider
+	}
+	if strings.TrimSpace(llm.Model) == "" {
+		llm.Model = DefaultLLMModel
+	}
+	if strings.TrimSpace(llm.APIKeyEnv) == "" {
+		llm.APIKeyEnv = DefaultLLMAPIKeyEnv
+	}
+
+	// Presentation needs no defaulting here: rca.Decide/Present already call
+	// rca.PresentationConfig.WithDefaults() internally on every use, so an
+	// omitted (zero-valued) presentation: section in the file behaves
+	// exactly like DefaultPresentationConfig() without this package needing
+	// to know those defaults itself.
 }
 
-// Validate checks the config, including that the named credential
+// Validate fully validates the config, including Slack credentials. Kept
+// for callers that already have a Config value (e.g. from Parse) and want
+// the same strictness Load applies.
+func (c Config) Validate() error {
+	return c.validate(true)
+}
+
+// validate checks the config, including that the named credential
 // environment variables are actually populated. Credentials are resolved
 // eagerly so a misconfigured deployment fails at startup rather than at the
-// first Slack call, in the middle of an incident.
-func (c Config) Validate() error {
-	if err := c.Notify.Slack.Validate(); err != nil {
-		return fmt.Errorf("notify.slack: %w", err)
+// first Slack or LLM call, in the middle of an incident. requireSlack skips
+// the Slack section's own validation (and its credential lookups) for
+// callers that do not use it - see LoadForRCA.
+func (c Config) validate(requireSlack bool) error {
+	if requireSlack {
+		if err := c.Notify.Slack.Validate(); err != nil {
+			return fmt.Errorf("notify.slack: %w", err)
+		}
+	}
+	if err := c.LLM.Validate(); err != nil {
+		return fmt.Errorf("llm: %w", err)
 	}
 	return nil
 }
@@ -212,6 +325,31 @@ func (s SlackConfig) AppToken() (string, error) {
 		return "", err
 	}
 	return token, nil
+}
+
+// Validate checks the LLM provider settings and requires the API key
+// environment variable to be set. Only the presence of each value is
+// checked; the key itself is not retained on the struct.
+func (l LLMConfig) Validate() error {
+	if strings.TrimSpace(l.Provider) == "" {
+		return fmt.Errorf("provider is required")
+	}
+	if strings.TrimSpace(l.Model) == "" {
+		return fmt.Errorf("model is required")
+	}
+	if err := validateEnvName("api_key_env", l.APIKeyEnv); err != nil {
+		return err
+	}
+	if _, err := l.APIKey(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// APIKey reads the LLM provider API key from the environment variable
+// named by APIKeyEnv. The error names the variable, never the value.
+func (l LLMConfig) APIKey() (string, error) {
+	return lookupSecret(l.APIKeyEnv)
 }
 
 func lookupSecret(name string) (string, error) {

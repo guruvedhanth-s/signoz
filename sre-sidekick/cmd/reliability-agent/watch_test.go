@@ -70,6 +70,7 @@ func TestRunWatchRequiresAWebhookSecret(t *testing.T) {
 
 	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
 	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
+	t.Setenv("OPENROUTER_API_KEY", "test-openrouter-key")
 	t.Setenv("SIDEKICK_WEBHOOK_SECRET", "")
 
 	err := runWatch([]string{"--config", path})
@@ -93,6 +94,7 @@ func TestDefaultConfigPathIsTheShippedFile(t *testing.T) {
 func TestWatchConfigDefaults(t *testing.T) {
 	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
 	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
+	t.Setenv("OPENROUTER_API_KEY", "test-openrouter-key")
 
 	cfg, err := config.Load(writeWatchConfig(t, watchConfig))
 	if err != nil {
