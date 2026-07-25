@@ -19,6 +19,7 @@ type Metrics struct {
 	sessionsActive metric.Int64UpDownCounter
 	notifyFailures metric.Int64Counter
 	followups      metric.Int64Counter
+	verifyChecks   metric.Int64Counter
 }
 
 // Metric names are effectively a public API: dashboards and alerts hardcode
@@ -41,6 +42,9 @@ const (
 	MetricNotifyFailures = "sidekick_notify_failures"
 	// MetricFollowups counts follow-up questions by outcome.
 	MetricFollowups = "sidekick_followups"
+	// MetricVerifyChecks counts verify-stage SLO re-evaluations (PRD
+	// section 16), by service and the re-evaluated SLO state.
+	MetricVerifyChecks = "sidekick_verify_checks"
 )
 
 // Outcomes recorded on MetricFollowups.
@@ -89,6 +93,11 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	verifyChecks, err := meter.Int64Counter(MetricVerifyChecks,
+		metric.WithDescription("Verify-stage SLO re-evaluations, by service and re-evaluated SLO state"))
+	if err != nil {
+		return nil, err
+	}
 
 	return &Metrics{
 		incidents:      incidents,
@@ -96,6 +105,7 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		sessionsActive: sessionsActive,
 		notifyFailures: notifyFailures,
 		followups:      followups,
+		verifyChecks:   verifyChecks,
 	}, nil
 }
 
@@ -136,6 +146,17 @@ func (m *Metrics) FollowupRecorded(ctx context.Context, service, outcome string)
 	m.followups.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("service", service),
 		attribute.String("outcome", outcome),
+	))
+}
+
+// VerifyChecked records one verify-stage SLO re-evaluation.
+func (m *Metrics) VerifyChecked(ctx context.Context, service, sloState string) {
+	if m == nil || m.verifyChecks == nil {
+		return
+	}
+	m.verifyChecks.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("service", service),
+		attribute.String("slo_state", sloState),
 	))
 }
 

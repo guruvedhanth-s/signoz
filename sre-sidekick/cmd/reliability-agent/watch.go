@@ -140,12 +140,17 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		SLOConfigPath: sloConfigPath,
 		Window:        window,
 	}
+	verifier := &rca.SLOVerifier{
+		Metrics:       signozClient,
+		SLOConfigPath: sloConfigPath,
+	}
 
 	coordinator, err := sidekickslack.NewCoordinator(
 		slackClient, sessions, rcaAdapter,
 		sidekickslack.WithDefaultEnvironment(cfg.DefaultEnvironment),
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
 		sidekickslack.WithCoordinatorMetrics(metrics),
+		sidekickslack.WithCoordinatorVerifier(verifier),
 	)
 	if err != nil {
 		return err

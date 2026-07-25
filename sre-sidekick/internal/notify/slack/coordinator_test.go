@@ -903,3 +903,153 @@ func TestConcurrentTurnsInOneThreadAreSerialised(t *testing.T) {
 		t.Errorf("history = %d turns, want 8 questions and 8 answers", got)
 	}
 }
+
+// fakeVerifier stands in for the deterministic SLO re-evaluation engine.
+type fakeVerifier struct {
+	result VerifyResult
+	err    error
+
+	mu       sync.Mutex
+	requests []VerifyRequest
+}
+
+func (f *fakeVerifier) Verify(_ context.Context, req VerifyRequest) (VerifyResult, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, req)
+	f.mu.Unlock()
+	if f.err != nil {
+		return VerifyResult{}, f.err
+	}
+	return f.result, nil
+}
+
+// An approval must offer a way to check recovery, and clicking it must
+// re-evaluate the SLO the incident was grounded on - not some other one.
+func TestApproveThenVerify_ChecksTheGroundedSLO(t *testing.T) {
+	verifier := &fakeVerifier{result: VerifyResult{SLOState: "healthy", BurnRate: 0.4, ErrorBudgetRemaining: 0.8, TelemetryTrusted: true, Recovered: true}}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionVerify, Value: "corr-123", ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	verifier.mu.Lock()
+	defer verifier.mu.Unlock()
+	if len(verifier.requests) != 1 {
+		t.Fatalf("verify calls = %d, want 1", len(verifier.requests))
+	}
+	req := verifier.requests[0]
+	if req.Service != "support-agent" || req.Environment != "prod" || req.SLO != "agent-success-rate" {
+		t.Errorf("VerifyRequest = %+v, want it scoped to the diagnosis's own service/environment/SLO", req)
+	}
+
+	if reply := f.lastPosted(t); !strings.Contains(reply, "recovered") {
+		t.Errorf("reply = %q, want it to report recovery", reply)
+	}
+}
+
+// Declining takes no action, so there is nothing to go verify - the button
+// must not appear, and clicking a stale verify action id must not crash if
+// it somehow arrives anyway.
+func TestDecline_DoesNotOfferVerify(t *testing.T) {
+	verifier := &fakeVerifier{}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionDecline, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	f.poster.mu.Lock()
+	update := f.poster.updates[len(f.poster.updates)-1]
+	f.poster.mu.Unlock()
+	_, values, err := slack.UnsafeApplyMsgOptions("xoxb-test", "C1", "http://localhost/", update.options...)
+	if err != nil {
+		t.Fatalf("apply msg options: %v", err)
+	}
+	if strings.Contains(values.Get("blocks"), ActionVerify) {
+		t.Error("a declined incident's retired message still offers a Verify button")
+	}
+
+	verifier.mu.Lock()
+	defer verifier.mu.Unlock()
+	if len(verifier.requests) != 0 {
+		t.Error("declining triggered a verify call")
+	}
+}
+
+// Verify can be clicked more than once while a human waits for a fix to
+// take effect, and it must never touch the recorded decision.
+func TestVerify_CanBeCheckedMultipleTimesWithoutAffectingTheDecision(t *testing.T) {
+	verifier := &fakeVerifier{result: VerifyResult{SLOState: "unhealthy", BurnRate: 3.0, TelemetryTrusted: true, Recovered: false}}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+	for i := 0; i < 3; i++ {
+		f.coordinator.OnInteraction(context.Background(), Interaction{
+			ActionID: ActionVerify, Value: "corr-123", ChannelID: opened.ChannelID,
+			ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+		})
+	}
+
+	verifier.mu.Lock()
+	calls := len(verifier.requests)
+	verifier.mu.Unlock()
+	if calls != 3 {
+		t.Errorf("verify calls = %d, want 3 - each click should re-check", calls)
+	}
+	if reply := f.lastPosted(t); !strings.Contains(reply, "not yet recovered") {
+		t.Errorf("reply = %q, want it to report the still-unhealthy state", reply)
+	}
+	if opened.Decision().Kind != session.DecisionApproved {
+		t.Error("verify changed the recorded decision")
+	}
+}
+
+func TestVerify_WithoutAVerifierRefusesCleanly(t *testing.T) {
+	f := newFixture(t, &fakeRCA{}) // no WithCoordinatorVerifier: defaults to UnavailableVerifier
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionVerify, Value: "corr-123", ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	if reply := f.lastPosted(t); !strings.Contains(reply, "not connected") {
+		t.Errorf("reply = %q, want it to say the verify engine is not connected", reply)
+	}
+}
+
+func TestVerify_UntrustedTelemetryIsReportedAsIndeterminate(t *testing.T) {
+	verifier := &fakeVerifier{result: VerifyResult{SLOState: "indeterminate", TelemetryTrusted: false}}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionVerify, Value: "corr-123", ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	if reply := f.lastPosted(t); !strings.Contains(reply, "indeterminate") {
+		t.Errorf("reply = %q, want it to say recovery is indeterminate rather than claim recovery or non-recovery", reply)
+	}
+}

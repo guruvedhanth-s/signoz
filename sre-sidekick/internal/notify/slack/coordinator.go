@@ -31,6 +31,7 @@ type Coordinator struct {
 	client   *Client
 	sessions *session.Manager
 	rca      RCA
+	verifier Verifier
 	logger   *slog.Logger
 	metrics  *Metrics
 
@@ -64,6 +65,17 @@ func WithCoordinatorLogger(logger *slog.Logger) CoordinatorOption {
 // OpenTelemetry, so the loop appears on a SigNoz dashboard (PRD section 17).
 func WithCoordinatorMetrics(metrics *Metrics) CoordinatorOption {
 	return func(c *Coordinator) { c.metrics = metrics }
+}
+
+// WithCoordinatorVerifier attaches the deterministic verify engine (PRD
+// section 16). Until attached, ActionVerify clicks refuse rather than
+// reporting a fabricated recovery state (UnavailableVerifier).
+func WithCoordinatorVerifier(verifier Verifier) CoordinatorOption {
+	return func(c *Coordinator) {
+		if verifier != nil {
+			c.verifier = verifier
+		}
+	}
 }
 
 // WithMaxConcurrentAnalysis caps concurrent RCA runs.
@@ -107,6 +119,7 @@ func NewCoordinator(
 		client:             client,
 		sessions:           sessions,
 		rca:                rca,
+		verifier:           UnavailableVerifier{},
 		logger:             slog.Default(),
 		defaultEnvironment: "prod",
 		analysis:           make(chan struct{}, 5),
@@ -185,6 +198,8 @@ func (c *Coordinator) OnInteraction(ctx context.Context, in Interaction) {
 		c.decide(ctx, found, in, session.DecisionDeclined)
 	case ActionClose:
 		c.closeSession(ctx, found, in)
+	case ActionVerify:
+		c.verify(ctx, found, in)
 	default:
 		c.logger.Warn("unknown slack action", "action_id", in.ActionID, "user", in.UserID)
 	}
@@ -230,8 +245,77 @@ func (c *Coordinator) decide(
 
 	notice := fmt.Sprintf("*%s by <@%s>* at %s", strings.ToUpper(verb[:1])+verb[1:], in.UserID,
 		existing.At.UTC().Format("2006-01-02 15:04:05 MST"))
-	c.retireButtons(ctx, s, in, notice)
+	if kind == session.DecisionApproved {
+		// Only an approval has something worth going to verify - a decline
+		// takes no action, so there is nothing to check recovery on.
+		c.retireButtonsWithVerify(ctx, s, in, notice)
+	} else {
+		c.retireButtons(ctx, s, in, notice)
+	}
 	c.postReply(ctx, in.ChannelID, in.ThreadTS, detail)
+}
+
+// verify handles the "Verify recovery" button (PRD section 16): it
+// re-evaluates the SLO the incident was grounded on and reports the
+// current state in the thread. It never mutates the session's decision -
+// unlike Approve/Decline, it can be clicked repeatedly while a human waits
+// for a fix to take effect.
+func (c *Coordinator) verify(ctx context.Context, s *session.Session, in Interaction) {
+	d := s.Diagnosis()
+	if strings.TrimSpace(d.Grounding.SLO) == "" {
+		c.postReply(ctx, in.ChannelID, in.ThreadTS, "This incident has no SLO to re-check.")
+		return
+	}
+
+	result, err := c.verifier.Verify(ctx, VerifyRequest{
+		Service:     s.Service,
+		Environment: s.Environment,
+		SLO:         d.Grounding.SLO,
+	})
+	if err != nil {
+		if errors.Is(err, ErrVerifierUnavailable) {
+			c.postReply(ctx, in.ChannelID, in.ThreadTS,
+				"The verify engine is not connected yet, so recovery cannot be checked automatically.")
+			return
+		}
+		c.logger.Error("verify failed",
+			"correlation_id", s.CorrelationID, "service", s.Service, "error", err.Error())
+		c.postReply(ctx, in.ChannelID, in.ThreadTS, "The recovery check failed: "+err.Error())
+		return
+	}
+
+	c.metrics.VerifyChecked(ctx, s.Service, result.SLOState)
+	c.logger.Info("verify checked",
+		"correlation_id", s.CorrelationID,
+		"service", s.Service,
+		"slo_state", result.SLOState,
+		"burn_rate", result.BurnRate,
+		"recovered", result.Recovered,
+	)
+
+	c.postReply(ctx, in.ChannelID, in.ThreadTS, verifyMessage(result))
+}
+
+// verifyMessage renders a VerifyResult as plain text: the deterministic
+// facts and numbers come straight from the SLO engine, so there is nothing
+// here for an LLM to phrase (PRD sections 7, 16).
+func verifyMessage(result VerifyResult) string {
+	if !result.TelemetryTrusted {
+		return fmt.Sprintf(
+			"*Recovery check: indeterminate.* Telemetry is not trusted for this window, so recovery cannot be confirmed. SLO state: `%s`.",
+			result.SLOState,
+		)
+	}
+	if result.Recovered {
+		return fmt.Sprintf(
+			"*Recovery check: recovered.* SLO state `%s`, burn rate %.2fx, error budget remaining %.1f%%.",
+			result.SLOState, result.BurnRate, result.ErrorBudgetRemaining*100,
+		)
+	}
+	return fmt.Sprintf(
+		"*Recovery check: not yet recovered.* SLO state `%s`, burn rate %.2fx, error budget remaining %.1f%%.",
+		result.SLOState, result.BurnRate, result.ErrorBudgetRemaining*100,
+	)
 }
 
 func (c *Coordinator) closeSession(ctx context.Context, s *session.Session, in Interaction) {
@@ -262,6 +346,26 @@ func (c *Coordinator) retireButtons(
 
 	d := s.Diagnosis()
 	blocks := ResolvedBlocks(DiagnosisBlocks(d), notice)
+	if err := c.client.UpdateMessage(ctx, in.ChannelID, timestamp, diagnosisFallback(d), blocks); err != nil {
+		c.logger.Warn("could not retire the decision buttons",
+			"correlation_id", s.CorrelationID, "error", err.Error())
+	}
+}
+
+// retireButtonsWithVerify is retireButtons for the approved outcome: the
+// Approve/Decline buttons still retire into the notice, but a "Verify
+// recovery" button is added so the human has a way to check the fix took
+// effect once they have applied it (PRD section 16).
+func (c *Coordinator) retireButtonsWithVerify(
+	ctx context.Context, s *session.Session, in Interaction, notice string,
+) {
+	timestamp := in.MessageTS
+	if strings.TrimSpace(timestamp) == "" {
+		timestamp = s.ThreadTS
+	}
+
+	d := s.Diagnosis()
+	blocks := ResolvedBlocksWithVerify(DiagnosisBlocks(d), notice, d.CorrelationID)
 	if err := c.client.UpdateMessage(ctx, in.ChannelID, timestamp, diagnosisFallback(d), blocks); err != nil {
 		c.logger.Warn("could not retire the decision buttons",
 			"correlation_id", s.CorrelationID, "error", err.Error())
