@@ -56,7 +56,7 @@ Two shapes are being built, in order:
 | 1 | Typed `sidekick.yaml` config loader | **done** | `feat/slack-config` |
 | 2 | Block Kit rendering (pure functions) | **done** | `feat/slack-blocks` |
 | 3 | Slack client + `notify.Notifier` implementation | **done** | `feat/slack-client` |
-| 4 | Session store (`internal/session`) | not started | — |
+| 4 | Session store (`internal/session`) | **done** | `feat/slack-sessions` |
 | 5 | Inbound HTTP (signature verify, 3s ack, dedup) | not started | — |
 | 6 | Handlers (interactivity, events, `/diagnose`) | not started | — |
 | 7 | Wire into the API server + `watch` subcommand | not started | — |
@@ -287,6 +287,104 @@ Note: `go test -race` does not run on a Windows box without a C toolchain
 
 ---
 
+## 4b. Phase 4 — session store (done)
+
+**Files:** `sre-sidekick/internal/session/session.go`, `manager.go`,
+`manager_test.go`
+
+A pure in-memory state machine. **This package must never import the Slack
+package** — phase 6's Slack handlers import *it*, so the dependency runs one
+way only. It also never posts, logs or reasons: anything that needs to *say*
+something returns to the caller instead.
+
+### Types
+
+```go
+type Status string   // open | resolved | expired
+type Session struct { ... }   // always passed by pointer; contains mutexes
+type View struct { ... }      // immutable snapshot, safe to copy and log
+type Turn struct { Actor Actor; Text string; At time.Time }
+type Decision struct { Kind DecisionKind; UserID, Note string; At time.Time }
+```
+
+`Fingerprint(service, environment, slo)` is the dedup key, lowercased and
+trimmed. **The window is deliberately excluded**: a window that shifts between
+evaluations would make every re-fire look like a new incident and silently
+defeat deduplication — the exact failure the key exists to prevent.
+
+### Manager API
+
+```go
+m := session.NewManager(session.WithTTL(ttl), session.WithClock(now))
+
+s, existing, err := m.Open(session.OpenRequest{ChannelID, ThreadTS, Diagnosis})
+s, ok := m.ByThread(channelID, threadTS)     // routes every inbound event
+s, ok := m.ByFingerprint(fp)                 // live sessions only
+err := m.AppendTurn(s, turn)
+err := m.AddEvidence(s, ev...)               // budgeted (E9)
+ok, existing, err := m.Decide(s, decision)   // single-writer
+err := m.Close(s, reason)
+m.Touch(s)
+expired := m.ReapIdle()                      // pure function; ticker lives in phase 7
+views := m.Snapshot()
+```
+
+### Behaviour decisions (settled, do not silently reopen)
+
+- **`Open` is passive on a re-fire.** When the fingerprint already has a live
+  session it returns it with `existing == true` and touches nothing: no post,
+  no turn appended, frozen diagnosis untouched. Whether a re-fire deserves a
+  thread update depends on how long ago the last one was, which is handler
+  policy, not store policy. `History` is LLM context; filling it with "alert
+  re-fired" system turns burns context window for no reasoning value. The
+  dedup still does its real job: the caller skips a second paid RCA run and a
+  duplicate thread (**E2**).
+- **A re-fire after resolution opens a *new* session.** Resolved and expired
+  sessions leave `byFingerprint`, so the same alert firing later is a new
+  incident with its own thread. A closed thread is a closed record.
+- **No `awaiting_decision` status.** Every open session with a fix implicitly
+  awaits one; a separate state would be a second source of truth.
+- **Single-writer decisions (E5).** The first terminal decision wins.
+  Later ones return `accepted == false` plus the decision already on record,
+  so the handler can reply "already resolved by @X at HH:MM". Verified by a
+  32-goroutine race test asserting exactly one acceptance.
+- **Closed sessions stay addressable** in `byThread` for `ClosedRetention`
+  (default 24h), so a late reply gets "this session is closed" rather than
+  "unknown thread" (**E7**). After that `ReapIdle` forgets them, which is the
+  memory backstop — there is no session-count cap by design.
+- **`ReapIdle` returns the sessions it expired** instead of announcing them.
+  Keeping the package Slack-free is what makes it testable and reusable for
+  another chat adapter (**E4**).
+- **Participants are a set of Slack user ids.** Nothing reads it yet. It
+  exists because "who was in the room" cannot be backfilled, and a stricter
+  approver policy (**E18**) or an `@`-mention on auto-close would need it.
+
+### Locking rules — read before editing
+
+There are two locks per session, for two different jobs:
+
+- **`Session.mu`** guards the struct's fields. Held only for short,
+  non-blocking updates, **never across a network or LLM call**.
+- **The turn lock** (`BeginTurn`/`EndTurn`) serialises a *whole* human turn
+  including the slow RCA call it triggers, so two people typing at once in one
+  thread are handled one after another and the history cannot be corrupted by
+  two half-finished updates (**E5**, **E15**). Handlers must take it for the
+  duration of the turn.
+
+Lock ordering is always **`Manager.mu` → `Session.mu`**, never the reverse.
+`Decide` and `Close` therefore release the session lock before touching the
+manager's indexes.
+
+### Not in this phase
+
+No HTTP, no Slack calls, no LLM, and no reaper *goroutine* — `ReapIdle` is a
+pure function; the ticker that calls it belongs to the server lifecycle in
+phase 7. The concurrency cap (`max_concurrent_rca`, **E8**) is a semaphore
+around the RCA run in phase 6, not a session-count limit here: the cost being
+capped is the paid analysis, not the map entry.
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -337,7 +435,9 @@ belong to Track D.
 - **Sessions are in-memory for now** (**E3**). A restart loses them; a reply to
   an old thread must fail gracefully with "this session was lost, run
   `/diagnose` to reopen", not a panic or silence. SQLite persistence is a
-  later phase.
+  later phase. Note the distinct case: `ByThread` returning a session whose
+  status is terminal means "closed", while `ByThread` returning nothing means
+  "forgotten or never existed" — those deserve different replies.
 - **Do not put grounding numbers through the LLM.** They are pinned into the
   prompt as frozen facts and echoed verbatim; the model writes phrasing only.
 
@@ -369,4 +469,5 @@ export SLACK_SIGNING_SECRET=...
 | — | 1 | `c084916` | Typed `sidekick.yaml` loader; env-var-named secrets, strict presence validation, unknown keys rejected |
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
+| — | 4 | pending | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
 | — | 3 | `a7daef5` | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
