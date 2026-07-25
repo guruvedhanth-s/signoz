@@ -1,0 +1,30 @@
+# SRE Sidekick configuration (PRD section 18).
+#
+# Secrets are NOT stored here. The *_env keys name the environment variables
+# that carry the credentials; the sidekick reads them from the process
+# environment at startup.
+#
+#   export SLACK_BOT_TOKEN=xoxb-...
+#   export SLACK_APP_TOKEN=xapp-...
+
+notify:
+  slack:
+    # Env var holding the Slack bot token (xoxb-...), used for outbound calls
+    # such as posting a diagnosis.
+    bot_token_env: SLACK_BOT_TOKEN
+    # Env var holding the Slack app-level token (xapp-...), used to open the
+    # Socket Mode connection. The sidekick dials out to Slack over a
+    # WebSocket, so it exposes no inbound HTTP endpoint and needs no signing
+    # secret.
+    app_token_env: SLACK_APP_TOKEN
+    # On-call channel that diagnoses are posted to. One incident becomes one
+    # thread in this channel, and that thread is the session.
+    default_channel: "#sre-sidekick"
+    # Environment assumed when a slash command does not name one, so
+    # `/diagnose support-agent` means `/diagnose support-agent prod`.
+    default_environment: prod
+    # Idle time after which a session is auto-closed by the TTL reaper.
+    session_ttl: 30m
+    # Cap on concurrent diagnose runs, so an alert storm cannot launch
+    # unbounded LLM/MCP work.
+    max_concurrent_rca: 5

@@ -41,6 +41,8 @@ func main() {
 			err = runAuditWatch(os.Args[2:])
 		case "diagnose":
 			err = runDiagnose(os.Args[2:])
+		case "watch":
+			err = runWatch(os.Args[2:])
 		default:
 			runServer(os.Args[1:])
 			return
