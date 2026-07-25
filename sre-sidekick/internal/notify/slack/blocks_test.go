@@ -452,6 +452,31 @@ func TestIndeterminateBlocks(t *testing.T) {
 	}
 }
 
+// A decided incident must not keep a live-looking Approve button: during an
+// incident that is actively misleading.
+func TestResolvedBlocks(t *testing.T) {
+	original := DiagnosisBlocks(diagnosedFixture())
+	resolved := ResolvedBlocks(original, "*Approved by <@U1>* at 2026-05-01 12:10:00 UTC")
+
+	if ids := actionIDs(t, resolved); len(ids) != 0 {
+		t.Errorf("action ids = %v, want every button retired", ids)
+	}
+	rendered := renderText(t, resolved)
+	if !strings.Contains(rendered, "Approved by <@U1>") {
+		t.Errorf("rendered message does not name who decided\n%s", rendered)
+	}
+	// The grounded facts and the evidence links must survive the rewrite.
+	for _, want := range []string{"agent-success-rate", "14.2x", "Evidence"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered message lost %q after the rewrite\n%s", want, rendered)
+		}
+	}
+	// The original must not be mutated in place.
+	if len(actionIDs(t, original)) == 0 {
+		t.Error("ResolvedBlocks mutated the blocks it was given")
+	}
+}
+
 func TestIndeterminateBlocksWithoutReason(t *testing.T) {
 	rendered := renderText(t, IndeterminateBlocks(notify.IndeterminateReason{}))
 	if !strings.Contains(rendered, "No reason was recorded") {

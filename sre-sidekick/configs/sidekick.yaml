@@ -20,6 +20,9 @@ notify:
     # On-call channel that diagnoses are posted to. One incident becomes one
     # thread in this channel, and that thread is the session.
     default_channel: "#sre-sidekick"
+    # Environment assumed when a slash command does not name one, so
+    # `/diagnose support-agent` means `/diagnose support-agent prod`.
+    default_environment: prod
     # Idle time after which a session is auto-closed by the TTL reaper.
     session_ttl: 30m
     # Cap on concurrent diagnose runs, so an alert storm cannot launch

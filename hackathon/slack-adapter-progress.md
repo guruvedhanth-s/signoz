@@ -58,7 +58,7 @@ Two shapes are being built, in order:
 | 3 | Slack client + `notify.Notifier` implementation | **done** | `feat/slack-client` |
 | 4 | Session store (`internal/session`) | **done** | `feat/slack-sessions` |
 | 5 | Inbound door: Socket Mode receiver | **done** | `feat/slack-inbound` |
-| 6 | Handlers (interactivity, events, `/diagnose`) | not started | — |
+| 6 | Handlers: coordinator, decisions, follow-ups | **done** | `feat/slack-handlers` |
 | 7 | Wire into the API server + `watch` subcommand | not started | — |
 | 8 | Integration tests + `sidekick_incidents` metrics | not started | — |
 
@@ -80,7 +80,12 @@ ttl, err := cfg.Notify.Slack.SessionTTLDuration()
 ```
 
 Shape (`notify.slack.*` in YAML): `bot_token_env`, `app_token_env`,
-`default_channel`, `session_ttl`, `max_concurrent_rca`.
+`default_channel`, `default_environment`, `session_ttl`,
+`max_concurrent_rca`.
+
+`default_environment` (phase 6) is what `/diagnose support-agent` resolves to.
+An SLO is always scoped to an environment, so guessing would report facts
+about the wrong system.
 
 `app_token_env` was added in phase 5 and **`signing_secret_env` was removed**:
 request signatures authenticate an inbound HTTP endpoint, and Socket Mode
@@ -485,6 +490,119 @@ ships only a recording test double.
 
 ---
 
+## 4d. Phase 6 — the coordinator (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/coordinator.go`, `rca.go`,
+`coordinator_test.go`, plus additions to `client.go` and `blocks.go`
+
+`Coordinator` implements the phase 5 `Handler`, so the receiver hands it work
+directly. It is where sessions, the poster and the analysis engine meet.
+
+```go
+coordinator, err := slack.NewCoordinator(client, sessions, rca,
+    slack.WithDefaultEnvironment(cfg.DefaultEnvironment),
+    slack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
+)
+
+// Alert-driven entry point: post, then open the session on the new thread.
+s, err := coordinator.Announce(ctx, diagnosis)
+
+// Handler (called by the receiver)
+coordinator.OnMessage(ctx, msg)
+coordinator.OnInteraction(ctx, interaction)
+coordinator.OnCommand(ctx, cmd)
+
+// Called by the phase 7 ticker
+coordinator.ReapIdle(ctx)
+```
+
+### The RCA seam — the integration point for the analysis branch
+
+`rca.go` declares the interface **on the consumer side**:
+
+```go
+type RCA interface {
+    Diagnose(ctx context.Context, req DiagnoseRequest) (notify.Diagnosis, error)
+    AnswerFollowup(ctx context.Context, req FollowupRequest) (string, error)
+}
+```
+
+`FollowupRequest` is a **flat value**, not a `*session.Session`, specifically so
+the analysis engine never has to import the session package. The coupling runs
+one way: the Slack adapter depends on a small interface, and the engine depends
+on nothing of ours. Attaching a real engine is a ~10-line adapter struct.
+
+Shipped with `UnavailableRCA`, which **refuses rather than improvises**. A
+fabricated root cause would be indistinguishable from a real one in the thread,
+so the stub returns `ErrRCAUnavailable` and the adapter says plainly that the
+engine is not connected — while noting the grounded facts still stand, because
+they came from the SLO engine, not a model.
+
+### Flows
+
+**Alert → thread.** `Announce` checks the fingerprint first. A live session for
+the same incident means a short "fired again" note in the *existing* thread and
+no second analysis (**E2**); otherwise it posts the diagnosis and opens the
+session keyed on the message it just created.
+
+**Button → decision.** `ByThread` → `Decide`/`Close` → rewrite the original
+message so the buttons are replaced by the outcome → reply in the thread. A
+second click gets "Already approved by @U1 at 14:32" (**E5**). A click with no
+session (restart) is answered, because the button proves the thread was ours.
+
+**Threaded message → answer.** Only threaded replies are considered; top-level
+channel messages belong to no incident. Then: turn lock → build the follow-up
+request → append the human turn → analysis → append the answer → reply.
+
+**`/diagnose <service> [env]`.** Acknowledge in channel, run the analysis under
+the concurrency cap, then `Announce`.
+
+### Decisions worth not re-litigating
+
+- **Buttons decide; text never does.** Typing "approve" triggers a nudge to the
+  button and records nothing. `isTerminalWord` matches only short, unqualified
+  phrases — "approve if you think the timeout theory holds" is a question, and
+  treating it as consent is the precise misread this design exists to avoid.
+  There is no intent classifier and no LLM in this path.
+- **The buttons are retired after a decision** via `chat.update` and
+  `ResolvedBlocks`. A live-looking Approve button on a decided incident is
+  actively misleading mid-incident. Update failure is logged, never
+  propagated: the decision is already in the session and the audit log.
+- **History excludes the current question.** `FollowupRequest.History` is the
+  conversation *so far*; the new turn travels in `Question`. Carrying it in
+  both would waste context and read as if it were asked twice.
+- **Unknown thread → one `conversations.replies` lookup.** The bot answers
+  only if it posted the thread root; otherwise it stays silent, and it stays
+  silent on lookup error too. Speaking wrongly in someone else's thread is
+  worse than saying nothing (**E3**).
+- **Closed sessions are answered once** per thread, tracked in the
+  coordinator's `notified` set (**E7**). Expired sessions say "expired", not
+  just "closed".
+- **Closing is not silencing.** Both the close reply and the expiry notice say
+  explicitly that ending the conversation does not stop a still-firing alert
+  (**E16**).
+- **The concurrency cap gates analysis only** (**E8**). Button clicks and
+  lookups are cheap and stay responsive when the system is saturated — a
+  decision must be possible even when busy. Saturation is stated plainly
+  ("too many analyses are running"), never silently queued.
+
+### Client additions
+
+`PostThreadReply`, `UpdateMessage`, `ThreadRootPostedByUs`, `Channel()`. The
+`poster` interface widened to three methods (`PostMessageContext`,
+`UpdateMessageContext`, `GetConversationRepliesContext`), all still satisfied
+by `*slack.Client` and by the test fake.
+
+### Testing note
+
+`slack.UnsafeApplyMsgOptions` exposes `text` and `thread_ts` but **not**
+`blocks` (see the phase 3 note). So coordinator tests assert on *which* message
+was updated, and `TestResolvedBlocks` asserts on *what* the rewrite contains.
+Log buffers in tests are wrapped in `syncBuffer`, because handler goroutines
+write to them while the test reads.
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -577,5 +695,6 @@ with `connections:write`, subscribe to `message.channels` (and
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
 | — | 4 | `2d01cc7` | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
+| — | 6 | pending | Coordinator: alert-to-thread announcements with dedup, button decisions with retired buttons, threaded follow-ups behind the RCA seam, `/diagnose`, idle expiry notices, analysis concurrency cap |
 | — | 5 | `9435ddc` | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
 | — | 3 | `a7daef5` | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |

@@ -27,6 +27,7 @@ const (
 	DefaultAppTokenEnv      = "SLACK_APP_TOKEN"
 	DefaultSessionTTL       = "30m"
 	DefaultMaxConcurrentRCA = 5
+	DefaultEnvironment      = "prod"
 )
 
 // Config is the root of `sidekick.yaml`.
@@ -59,6 +60,11 @@ type SlackConfig struct {
 	// default to a channel thread, not a DM, so the whole team shares context
 	// (session design edge case E14).
 	DefaultChannel string `yaml:"default_channel" json:"default_channel"`
+	// DefaultEnvironment is the environment assumed when a slash command does
+	// not name one, e.g. `/diagnose support-agent`. Required because an SLO is
+	// always scoped to an environment: diagnosing the wrong one would report
+	// facts about the wrong system.
+	DefaultEnvironment string `yaml:"default_environment" json:"default_environment"`
 	// SessionTTL is how long a session may sit idle before the reaper closes
 	// it (session design edge case E4). Go duration string, e.g. "30m".
 	SessionTTL string `yaml:"session_ttl" json:"session_ttl"`
@@ -111,6 +117,9 @@ func (c *Config) applyDefaults() {
 	if strings.TrimSpace(slack.SessionTTL) == "" {
 		slack.SessionTTL = DefaultSessionTTL
 	}
+	if strings.TrimSpace(slack.DefaultEnvironment) == "" {
+		slack.DefaultEnvironment = DefaultEnvironment
+	}
 	if slack.MaxConcurrentRCA == 0 {
 		slack.MaxConcurrentRCA = DefaultMaxConcurrentRCA
 	}
@@ -136,6 +145,9 @@ func (s SlackConfig) Validate() error {
 	}
 	if strings.ContainsAny(s.DefaultChannel, " \t\n") {
 		return fmt.Errorf("default_channel %q must not contain whitespace", s.DefaultChannel)
+	}
+	if strings.ContainsAny(s.DefaultEnvironment, " \t\n") {
+		return fmt.Errorf("default_environment %q must not contain whitespace", s.DefaultEnvironment)
 	}
 	if err := validateEnvName("bot_token_env", s.BotTokenEnv); err != nil {
 		return err

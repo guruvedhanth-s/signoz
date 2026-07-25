@@ -15,6 +15,25 @@ import (
 	"github.com/slack-go/slack/socketmode"
 )
 
+// syncBuffer is a log sink that a test goroutine can read while the receiver's
+// goroutines are still writing to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // recordingAcker records which envelopes were acknowledged, and when relative
 // to the handler doing its work.
 type recordingAcker struct {
@@ -104,13 +123,13 @@ func (h *recordingHandler) counts() (int, int, int) {
 
 // startReceiver runs a receiver over a channel the test controls.
 func startReceiver(t *testing.T, handler Handler, opts ...ReceiverOption) (
-	chan socketmode.Event, *recordingAcker, *bytes.Buffer, func(),
+	chan socketmode.Event, *recordingAcker, *syncBuffer, func(),
 ) {
 	t.Helper()
 
 	events := make(chan socketmode.Event, 16)
 	acker := &recordingAcker{}
-	logs := &bytes.Buffer{}
+	logs := &syncBuffer{}
 
 	receiver, err := NewReceiver(events, acker, handler, append([]ReceiverOption{
 		WithReceiverLogger(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
@@ -262,7 +281,7 @@ func TestCommandIsDispatched(t *testing.T) {
 // human turn is processed twice.
 func TestDuplicateDeliveryIsDroppedButStillAcked(t *testing.T) {
 	handler := newRecordingHandler()
-	events, acker, logs, _ := startReceiver(t, handler)
+	events, _, logs, _ := startReceiver(t, handler)
 
 	events <- messageEvent("env-1", "Ev001", "same message")
 	handler.waitFor(t, 1)
@@ -272,8 +291,8 @@ func TestDuplicateDeliveryIsDroppedButStillAcked(t *testing.T) {
 	retry.Request.RetryReason = "timeout"
 	events <- retry
 
-	// Give the receiver time to process and drop it.
-	waitFor(t, func() bool { return acker.count() == 2 })
+	// The drop is logged after the ack, so wait for the log, not the ack.
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "duplicate") })
 
 	messages, _, _ := handler.counts()
 	if messages != 1 {
