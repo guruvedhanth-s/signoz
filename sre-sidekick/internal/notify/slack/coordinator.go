@@ -422,6 +422,16 @@ func (c *Coordinator) markNotified(channelID, threadTS string) bool {
 // conversation. That is why ending a session is a button (session design
 // section 2.1, edge case E1).
 func (c *Coordinator) OnCommand(ctx context.Context, cmd Command) {
+	if cmd.Command != DiagnoseCommand {
+		// Slack only ever routes commands this app is registered for, but a
+		// misconfigured app manifest (or a renamed command) must not fall
+		// through to "diagnose whatever text follows" - that would let an
+		// unrelated command silently trigger a paid RCA run.
+		c.postReply(ctx, cmd.ChannelID, "",
+			fmt.Sprintf("Unrecognized command %q.", cmd.Command))
+		return
+	}
+
 	service, environment := parseDiagnoseArgs(cmd.Text, c.defaultEnvironment)
 	if service == "" {
 		c.postReply(ctx, cmd.ChannelID, "",

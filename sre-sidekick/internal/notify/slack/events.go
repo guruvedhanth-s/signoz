@@ -59,6 +59,11 @@ type Interaction struct {
 	ResponseURL string
 }
 
+// DiagnoseCommand is the only slash command this adapter answers (PRD section
+// 14). It is the name registered in the Slack app manifest, e.g.
+// `/diagnose support-agent`.
+const DiagnoseCommand = "/diagnose"
+
 // Command is a slash command invocation, e.g. `/diagnose support-agent`.
 //
 // Slash commands are deliberately used only to *start* a session. They cannot

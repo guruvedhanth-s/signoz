@@ -629,6 +629,28 @@ func TestDiagnoseCommandOpensASession(t *testing.T) {
 	}
 }
 
+// Slack only ever routes commands this app is registered for, but the
+// handler must not trust that blindly: an unrecognized command name must
+// never fall through to "diagnose whatever text follows", or a renamed or
+// misconfigured command could trigger a paid RCA run silently.
+func TestUnrecognizedCommandIsRejected(t *testing.T) {
+	rca := &fakeRCA{diagnosis: diagnosedFixture()}
+	f := newFixture(t, rca)
+
+	f.coordinator.OnCommand(context.Background(), Command{
+		Command: "/other", Text: "support-agent", ChannelID: "C1", UserID: "U1",
+	})
+
+	if reply := f.lastPosted(t); !strings.Contains(reply, "Unrecognized command") {
+		t.Errorf("reply = %q, want an unrecognized-command message", reply)
+	}
+	rca.mu.Lock()
+	defer rca.mu.Unlock()
+	if len(rca.diagnosed) != 0 {
+		t.Error("an unrecognized command still triggered an analysis run")
+	}
+}
+
 func TestDiagnoseCommandAcceptsAnExplicitEnvironment(t *testing.T) {
 	rca := &fakeRCA{diagnosis: diagnosedFixture()}
 	f := newFixture(t, rca, WithDefaultEnvironment("prod"))
