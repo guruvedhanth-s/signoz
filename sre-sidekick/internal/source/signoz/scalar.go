@@ -2,6 +2,7 @@ package signoz
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source"
@@ -152,6 +153,17 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 // otherwise silently parse as a valid answer of 0 - indistinguishable from
 // a metric that genuinely has no samples. scalar() treats that as an
 // error rather than a zero.
+//
+// A data row is not guaranteed to be all-float: a query with an "le"
+// filter (a latency_threshold SLI's bucket query) still comes back with
+// "le" as its own "group"-typed column alongside the "aggregation" column
+// - SigNoz keeps histogram bucket boundaries as an explicit group even
+// when the filter pins it to one value, confirmed live against a running
+// SigNoz instance (a query filtered to le='1000' still returned a row
+// shaped ["1000", <count>], not just [<count>]). Decoding Data as
+// [][]float64 fails outright the moment any row contains that group
+// value, so each cell is decoded individually and only "aggregation"-typed
+// columns are read as numbers.
 type scalarBuilderResponse struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -160,7 +172,7 @@ type scalarBuilderResponse struct {
 				Columns []struct {
 					ColumnType string `json:"columnType"`
 				} `json:"columns"`
-				Data [][]float64 `json:"data"`
+				Data [][]json.RawMessage `json:"data"`
 			} `json:"results"`
 		} `json:"data"`
 	} `json:"data"`
@@ -177,7 +189,11 @@ func (r scalarBuilderResponse) scalar() (float64, error) {
 				if column.ColumnType != "aggregation" || i >= len(row) {
 					continue
 				}
-				sum += row[i]
+				var value float64
+				if err := json.Unmarshal(row[i], &value); err != nil {
+					return 0, fmt.Errorf("decode SigNoz scalar aggregation value: %w", err)
+				}
+				sum += value
 			}
 		}
 	}

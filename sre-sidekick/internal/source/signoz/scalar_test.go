@@ -139,6 +139,55 @@ func TestScalarBuilderReturnsZeroForEmptyResult(t *testing.T) {
 	}
 }
 
+// TestScalarBuilderHandlesGroupColumnAlongsideAggregation locks in the fix
+// for a bug where a data row was decoded as [][]float64 unconditionally,
+// but a query filtered on a group dimension (e.g. a latency_threshold
+// SLI's "le" bucket filter) still comes back with that dimension as its
+// own "group"-typed column alongside the "aggregation" column - confirmed
+// live against a running SigNoz instance: filtering signoz_latency.bucket
+// by le='1000' still returned a row shaped ["1000", <count>], not just
+// [<count>]. The old [][]float64 decode failed outright the moment any row
+// contained that string value; scalar() must skip non-"aggregation"
+// columns and only decode the ones it actually sums.
+func TestScalarBuilderHandlesGroupColumnAlongsideAggregation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"data": map[string]any{
+					"results": []any{
+						map[string]any{
+							"queryName": "A",
+							"columns": []any{
+								map[string]any{"name": "le", "columnType": "group"},
+								map[string]any{"name": "__result_0", "columnType": "aggregation"},
+							},
+							"data": []any{[]any{"1000", 11721}},
+						},
+					},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+	value, err := client.ScalarBuilder(context.Background(), source.MetricQuery{
+		Metric: "signoz_latency.bucket",
+		Filter: "service.name = 'support-agent' AND le = '1000'",
+	}, 1000, 2000)
+	if err != nil {
+		t.Fatalf("ScalarBuilder: %v", err)
+	}
+	if value != 11721 {
+		t.Fatalf("expected scalar 11721, got %v", value)
+	}
+}
+
 // TestScalarBuilderErrorsOnNonSuccessStatus locks in the fix for a bug
 // where scalarBuilderResponse.scalar() never looked at the response's
 // application-level Status field: a malformed query or an internal

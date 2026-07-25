@@ -46,10 +46,17 @@ func evaluateSLI(ctx context.Context, querier source.MetricQuerier, cfg Config, 
 // works unchanged across windows (see EvaluateMultiWindow).
 func deriveMetricQueries(cfg Config, definition Definition) (source.MetricQuery, source.MetricQuery, error) {
 	serviceLabel, environmentLabel := cfg.MetricLabels()
+	if trimmed := strings.TrimSpace(definition.ServiceLabel); trimmed != "" {
+		serviceLabel = trimmed
+	}
+	if trimmed := strings.TrimSpace(definition.EnvironmentLabel); trimmed != "" {
+		environmentLabel = trimmed
+	}
 	filter := scopeExpression(cfg.Service, cfg.Environment, serviceLabel, environmentLabel)
+	temporality := metricTemporality(definition)
 	switch definition.Type {
 	case SLITypeRatio, SLITypeCompleteness, SLITypeGroundedAnswers:
-		return counterQuery(definition.GoodMetric, filter), counterQuery(definition.TotalMetric, filter), nil
+		return counterQuery(definition.GoodMetric, filter, temporality), counterQuery(definition.TotalMetric, filter, temporality), nil
 	case SLITypeLatencyThreshold:
 		metric := strings.TrimSpace(definition.LatencyMetric)
 		if metric == "" {
@@ -57,12 +64,30 @@ func deriveMetricQueries(cfg Config, definition Definition) (source.MetricQuery,
 		}
 		thresholdValue := latencyThresholdBucketValue(definition)
 		bucketFilter := filter + fmt.Sprintf(" AND le = '%s'", thresholdValue)
-		good := counterQuery(metric+"_bucket", bucketFilter)
-		total := counterQuery(metric+"_count", filter)
+		bucketMetric := latencyChildMetric(definition.LatencyBucketMetric, metric, "_bucket")
+		countMetric := latencyChildMetric(definition.LatencyCountMetric, metric, "_count")
+		good := counterQuery(bucketMetric, bucketFilter, temporality)
+		total := counterQuery(countMetric, filter, temporality)
 		return good, total, nil
 	default:
 		return source.MetricQuery{}, source.MetricQuery{}, fmt.Errorf("unsupported SLI type %q", definition.Type)
 	}
+}
+
+// metricTemporality resolves the OTel temporality deriveMetricQueries'
+// counter queries use: "Cumulative" (default - matches a typical
+// OTel-SDK-instrumented counter, e.g. a custom request-count metric) or
+// "Delta" for MetricTemporality: "delta". This is NOT a given: SigNoz's
+// own spanmetrics-processor-derived metrics (signoz_latency.bucket/.count,
+// and any other signoz_*-prefixed derived metric) are Delta temporality -
+// confirmed live: an "increase" aggregation against signoz_latency.count
+// with Cumulative temporality returned an empty result set, while the
+// identical query with Delta temporality returned the real count.
+func metricTemporality(definition Definition) string {
+	if strings.EqualFold(strings.TrimSpace(definition.MetricTemporality), "delta") {
+		return "Delta"
+	}
+	return "Cumulative"
 }
 
 // latencyThresholdBucketValue converts ThresholdMS into the string the
@@ -78,13 +103,32 @@ func latencyThresholdBucketValue(definition Definition) string {
 	return strconv.FormatFloat(definition.ThresholdMS, 'f', -1, 64)
 }
 
-func counterQuery(metric, filter string) source.MetricQuery {
+// latencyChildMetric resolves the concrete metric name for a latency
+// histogram's bucket or count series: an explicit override
+// (LatencyBucketMetric/LatencyCountMetric) if the config set one,
+// otherwise the derived <base><suffix> name (today's behavior - the OTel
+// semantic-convention underscore suffix). An override is required for
+// histograms whose child metrics don't follow that convention - e.g.
+// SigNoz's own zero-instrumentation "signoz_latency" metric, whose real
+// child metrics are dot-separated (signoz_latency.bucket,
+// signoz_latency.count), confirmed live against a running SigNoz
+// instance. Getting this wrong does not error: a nonexistent metric name
+// queries successfully with zero rows (see ScalarBuilder), so the SLO
+// silently reports indeterminate/no-data instead of failing loudly.
+func latencyChildMetric(override, base, suffix string) string {
+	if trimmed := strings.TrimSpace(override); trimmed != "" {
+		return trimmed
+	}
+	return base + suffix
+}
+
+func counterQuery(metric, filter, temporality string) source.MetricQuery {
 	return source.MetricQuery{
 		Metric:           strings.TrimSpace(metric),
 		Filter:           filter,
 		TimeAggregation:  "increase",
 		SpaceAggregation: "sum",
-		Temporality:      "Cumulative",
+		Temporality:      temporality,
 	}
 }
 

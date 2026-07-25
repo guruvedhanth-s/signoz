@@ -76,6 +76,27 @@ func TestLatencyBucketUnitAcceptsMSAndSAndRejectsOther(t *testing.T) {
 	}
 }
 
+func TestMetricTemporalityAcceptsCumulativeAndDeltaAndRejectsOther(t *testing.T) {
+	base := Definition{
+		Name: "x", Type: SLITypeRatio, Target: 0.99, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total",
+	}
+
+	for _, temporality := range []string{"", "cumulative", "Cumulative", "delta", "DELTA"} {
+		d := base
+		d.MetricTemporality = temporality
+		if err := d.Validate(); err != nil {
+			t.Errorf("metric_temporality %q should be valid, got error: %v", temporality, err)
+		}
+	}
+
+	invalid := base
+	invalid.MetricTemporality = "gauge"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("expected an invalid metric_temporality to be rejected")
+	}
+}
+
 func TestConfigRequiresServiceAndEnvironment(t *testing.T) {
 	cfg := Config{
 		SLOs: []Definition{{
