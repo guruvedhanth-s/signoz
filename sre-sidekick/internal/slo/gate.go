@@ -36,6 +36,17 @@ type GateRequest struct {
 	Dependencies     []string
 	ServiceLabel     string
 	EnvironmentLabel string
+	// Now is the evaluation instant the caller (Engine.Evaluate) is scoring
+	// against - the end of the [start,end] window the gate must check
+	// dependency presence for. Zero means "use the gate's own clock"
+	// (g.Now, defaulting to time.Now), which keeps direct/test callers
+	// that never set it working unchanged. Engine always sets this to the
+	// same `now` it evaluates the SLI against, so a completeness check for
+	// a historical window (e.g. server.go's SLORequest.Now) is scoped to
+	// that window - not to whatever time the gate happens to run at -
+	// otherwise a gate call for a past window would check today's
+	// telemetry instead of the window actually being evaluated.
+	Now time.Time
 }
 
 func (g *MetricPresenceGate) Check(ctx context.Context, request GateRequest) (GateResult, error) {
@@ -49,7 +60,10 @@ func (g *MetricPresenceGate) Check(ctx context.Context, request GateRequest) (Ga
 	if g.Scalar == nil {
 		return GateResult{QueryComplete: false, Trusted: false, Reason: "scalar querier is not configured"}, nil
 	}
-	now := g.Now()
+	now := request.Now
+	if now.IsZero() {
+		now = g.Now()
+	}
 	start := uint64(now.Add(-request.Window).UnixMilli())
 	end := uint64(now.UnixMilli())
 	serviceLabel := request.ServiceLabel

@@ -74,6 +74,7 @@ func (e *Engine) evaluate(ctx context.Context, cfg Config, definition Definition
 			Dependencies:     dependencies,
 			ServiceLabel:     serviceLabel,
 			EnvironmentLabel: environmentLabel,
+			Now:              now,
 		})
 		if gateErr != nil {
 			return indeterminate(report, gateErr)
