@@ -165,54 +165,29 @@ func runDiagnose(args []string) error {
 	}
 
 	ctx := context.Background()
-	client := signoz.NewClient(*signozURL, *apiKey)
+
+	agent, client, err := buildRCAAgent(ctx, rcaConfig{
+		SignozURL:              *signozURL,
+		APIKey:                 *apiKey,
+		Limit:                  *limit,
+		MCPURL:                 *mcpURL,
+		SignozInternalURL:      *signozInternalURL,
+		PresentationConfigPath: *presentationConfigPath,
+	})
+	if err != nil {
+		return err
+	}
+	agent.Notifier = notify.NewFake()
 
 	// Ground the incident in the deterministic SLO facts (state, burn rate,
 	// error budget, telemetry trust) computed by the SLO engine and
 	// completeness gate, exactly the way `slo` does, before the RCA agent
 	// ever runs - the RCA agent and its reasoner only ever read Grounding,
 	// never compute it (PRD section 7, section 13).
-	grounding, sloName, err := evaluateGrounding(ctx, client, *sloConfigPath, *service, *environment)
+	grounding, sloName, err := rca.EvaluateGrounding(ctx, client, *sloConfigPath, *service, *environment)
 	if err != nil {
 		return err
 	}
-
-	presentationConfig, err := rca.LoadPresentationConfig(*presentationConfigPath)
-	if err != nil {
-		return err
-	}
-
-	agent := &rca.Agent{
-		Gate:         &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, *limit)},
-		Notifier:     notify.NewFake(),
-		Presentation: presentationConfig,
-	}
-
-	var toolCaller rca.MCPToolCaller
-	var toolSchemas []rca.ToolSchema
-	if *mcpURL != "" {
-		mcpClient := mcp.NewClient(*mcpURL, *apiKey, *signozInternalURL, nil)
-		if err := mcpClient.Initialize(ctx); err != nil {
-			return fmt.Errorf("connect to SigNoz MCP server: %w", err)
-		}
-		agent.EvidenceSource = &rca.MCPEvidenceSource{Client: mcpClient, PublicSignozURL: *signozURL}
-		agent.SignalsCaller = mcpClient
-		toolCaller = mcpClient
-		if tools, err := mcpClient.ListTools(ctx); err != nil {
-			slog.Warn("diagnose: list MCP tools failed; the reasoner will not have live tool access", "error", err)
-		} else {
-			toolSchemas = rca.ToolSchemasFromMCPTools(tools)
-		}
-	}
-
-	// Preflight the real LLM reasoner: fail clearly here if the OpenRouter
-	// API key is missing rather than silently falling back to a stub and
-	// producing a diagnosis nobody should trust.
-	reasoner, err := rca.NewLLMReasonerFromEnv(toolCaller, toolSchemas)
-	if err != nil {
-		return err
-	}
-	agent.Reasoner = reasoner
 
 	incident := rca.Incident{
 		CorrelationID: fmt.Sprintf("diagnose-%s-%s-%d", *service, *environment, time.Now().UnixNano()),
@@ -234,36 +209,78 @@ func runDiagnose(args []string) error {
 	return encoder.Encode(diagnosis)
 }
 
-// evaluateGrounding evaluates the SLO config at configPath and maps the
-// report for the SLO scoped to service/environment into a notify.Grounding
-// via rca.GroundingFromReport, along with the SLO's name. If the config's
-// service/environment do not match the incident being diagnosed, grounding
-// is skipped (a zero-value Grounding is returned, matching the
-// already-conservative telemetryTrusted=false default) with a warning
-// logged, rather than silently attaching facts about the wrong service.
-func evaluateGrounding(ctx context.Context, client *signoz.Client, configPath, service, environment string) (notify.Grounding, string, error) {
-	cfg, err := slo.LoadConfig(configPath)
-	if err != nil {
-		return notify.Grounding{}, "", fmt.Errorf("load SLO config for grounding: %w", err)
-	}
-	if cfg.Service != service || cfg.Environment != environment {
-		slog.Warn("diagnose: SLO config service/environment does not match the incident; diagnosing without grounding",
-			"slo_config_service", cfg.Service, "slo_config_environment", cfg.Environment,
-			"service", service, "environment", environment)
-		return notify.Grounding{}, "", nil
+// rcaConfig holds everything needed to construct a live Track C *rca.Agent:
+// which SigNoz to read from, whether to gather evidence via MCP, and where
+// the presentation-rule thresholds live. It is the shared shape `diagnose`
+// and `watch` both build from, so an agent is wired up exactly once, the
+// same way, regardless of who triggers a diagnosis (PRD section 7).
+type rcaConfig struct {
+	SignozURL string
+	APIKey    string
+	Limit     int
+	// MCPURL, when set, gathers evidence live via the SigNoz MCP server
+	// instead of the M1 telemetry-source placeholder.
+	MCPURL string
+	// SignozInternalURL is the SigNoz URL the MCP server should use to
+	// reach SigNoz (sent as the X-SigNoz-URL header); required when MCPURL
+	// is set.
+	SignozInternalURL      string
+	PresentationConfigPath string
+}
+
+// buildRCAAgent constructs a *rca.Agent wired for live SigNoz evidence
+// (optionally via MCP) and the real OpenRouter/DeepSeek reasoner. It does
+// not set Agent.Notifier: callers attach whichever Notifier fits their
+// context (notify.NewFake() for `diagnose`'s one-shot CLI output, the real
+// Slack client for `watch`).
+//
+// The returned *signoz.Client is exposed too because callers also need it
+// to ground incidents via rca.EvaluateGrounding - one client, reused for
+// both evidence gathering and SLO grounding queries.
+func buildRCAAgent(ctx context.Context, cfg rcaConfig) (*rca.Agent, *signoz.Client, error) {
+	if cfg.MCPURL != "" && cfg.SignozInternalURL == "" {
+		return nil, nil, fmt.Errorf("a SigNoz internal URL is required when an MCP URL is set")
 	}
 
-	gate := slo.NewMetricPresenceGate(client, nil)
-	engine := slo.NewEngine(client, gate)
-	reports, err := engine.Evaluate(ctx, cfg, time.Now())
+	client := signoz.NewClient(cfg.SignozURL, cfg.APIKey)
+
+	presentationConfig, err := rca.LoadPresentationConfig(cfg.PresentationConfigPath)
 	if err != nil {
-		return notify.Grounding{}, "", fmt.Errorf("evaluate SLO for grounding: %w", err)
+		return nil, nil, err
 	}
-	report, ok := rca.SelectReport(reports, "")
-	if !ok {
-		return notify.Grounding{}, "", nil
+
+	agent := &rca.Agent{
+		Gate:         &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, cfg.Limit)},
+		Presentation: presentationConfig,
 	}
-	return rca.GroundingFromReport(environment, report), report.Name, nil
+
+	var toolCaller rca.MCPToolCaller
+	var toolSchemas []rca.ToolSchema
+	if cfg.MCPURL != "" {
+		mcpClient := mcp.NewClient(cfg.MCPURL, cfg.APIKey, cfg.SignozInternalURL, nil)
+		if err := mcpClient.Initialize(ctx); err != nil {
+			return nil, nil, fmt.Errorf("connect to SigNoz MCP server: %w", err)
+		}
+		agent.EvidenceSource = &rca.MCPEvidenceSource{Client: mcpClient, PublicSignozURL: cfg.SignozURL}
+		agent.SignalsCaller = mcpClient
+		toolCaller = mcpClient
+		if tools, err := mcpClient.ListTools(ctx); err != nil {
+			slog.Warn("rca: list MCP tools failed; the reasoner will not have live tool access", "error", err)
+		} else {
+			toolSchemas = rca.ToolSchemasFromMCPTools(tools)
+		}
+	}
+
+	// Preflight the real LLM reasoner: fail clearly here if the OpenRouter
+	// API key is missing rather than silently falling back to a stub and
+	// producing a diagnosis nobody should trust.
+	reasoner, err := rca.NewLLMReasonerFromEnv(toolCaller, toolSchemas)
+	if err != nil {
+		return nil, nil, err
+	}
+	agent.Reasoner = reasoner
+
+	return agent, client, nil
 }
 
 // logNotifierDelivery logs what the (fake, for now) notifier received, so
