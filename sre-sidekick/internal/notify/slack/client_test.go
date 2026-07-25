@@ -29,11 +29,19 @@ type fakePoster struct {
 
 	calls   []fakeCall
 	results []fakeResult
+
+	updates      []fakeCall
+	updateErr    error
+	replies      []slack.Message
+	replyLookups []string
+	repliesErr   error
 }
 
 type fakeCall struct {
 	channel string
 	options []slack.MsgOption
+	// updateTS is set when the call was an edit rather than a new message.
+	updateTS string
 }
 
 type fakeResult struct {
@@ -60,6 +68,38 @@ func (f *fakePoster) PostMessageContext(
 		result.channel = channelID
 	}
 	return result.channel, result.timestamp, result.err
+}
+
+func (f *fakePoster) UpdateMessageContext(
+	_ context.Context, channelID, timestamp string, options ...slack.MsgOption,
+) (string, string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.updates = append(f.updates, fakeCall{channel: channelID, updateTS: timestamp, options: options})
+	if f.updateErr != nil {
+		return "", "", "", f.updateErr
+	}
+	return channelID, timestamp, "", nil
+}
+
+func (f *fakePoster) GetConversationRepliesContext(
+	_ context.Context, params *slack.GetConversationRepliesParameters,
+) ([]slack.Message, bool, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.replyLookups = append(f.replyLookups, params.Timestamp)
+	if f.repliesErr != nil {
+		return nil, false, "", f.repliesErr
+	}
+	return f.replies, false, "", nil
+}
+
+func (f *fakePoster) updateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.updates)
 }
 
 func (f *fakePoster) callCount() int {
@@ -173,7 +213,7 @@ func testClient(t *testing.T, fake *fakePoster, opts ...Option) (*Client, *bytes
 func testConfig() config.SlackConfig {
 	return config.SlackConfig{
 		BotTokenEnv:      "SLACK_BOT_TOKEN",
-		SigningSecretEnv: "SLACK_SIGNING_SECRET",
+		AppTokenEnv:      "SLACK_APP_TOKEN",
 		DefaultChannel:   "#sre-sidekick",
 		SessionTTL:       "30m",
 		MaxConcurrentRCA: 5,
@@ -502,6 +542,18 @@ type panickingPoster struct{}
 func (panickingPoster) PostMessageContext(
 	context.Context, string, ...slack.MsgOption,
 ) (string, string, error) {
+	panic("transport exploded")
+}
+
+func (panickingPoster) UpdateMessageContext(
+	context.Context, string, string, ...slack.MsgOption,
+) (string, string, string, error) {
+	panic("transport exploded")
+}
+
+func (panickingPoster) GetConversationRepliesContext(
+	context.Context, *slack.GetConversationRepliesParameters,
+) ([]slack.Message, bool, string, error) {
 	panic("transport exploded")
 }
 

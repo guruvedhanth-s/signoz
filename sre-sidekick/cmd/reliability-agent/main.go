@@ -36,6 +36,8 @@ func main() {
 			err = runGenerate(os.Args[2:])
 		case "audit-watch":
 			err = runAuditWatch(os.Args[2:])
+		case "watch":
+			err = runWatch(os.Args[2:])
 		default:
 			runServer(os.Args[1:])
 			return
