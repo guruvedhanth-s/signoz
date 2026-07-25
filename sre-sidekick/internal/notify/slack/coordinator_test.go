@@ -904,6 +904,83 @@ func TestConcurrentTurnsInOneThreadAreSerialised(t *testing.T) {
 	}
 }
 
+// fakeActuator stands in for the Act-stage adapter.
+type fakeActuator struct {
+	result ActionResult
+	err    error
+
+	mu       sync.Mutex
+	requests []ActionRequest
+}
+
+func (f *fakeActuator) Act(_ context.Context, req ActionRequest) (ActionResult, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, req)
+	f.mu.Unlock()
+	if f.err != nil {
+		return ActionResult{}, f.err
+	}
+	return f.result, nil
+}
+
+// Approving must hand the proposal to the Actuator automatically - there
+// is no separate button, because the approval itself is the human gate the
+// Actuator is waiting for (PRD sections 15, 18).
+func TestApprove_HandsTheProposalToTheActuator(t *testing.T) {
+	actuator := &fakeActuator{result: ActionResult{Outcome: OutcomeRecorded}}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorActuator(actuator))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	actuator.mu.Lock()
+	defer actuator.mu.Unlock()
+	if len(actuator.requests) != 1 {
+		t.Fatalf("Act calls = %d, want 1", len(actuator.requests))
+	}
+	req := actuator.requests[0]
+	if req.Service != "support-agent" || req.Environment != "prod" || req.CorrelationID != "corr-123" {
+		t.Errorf("ActionRequest = %+v, want it scoped to the diagnosis", req)
+	}
+}
+
+// Declining must never reach the Actuator: nothing was approved to act on.
+func TestDecline_NeverReachesTheActuator(t *testing.T) {
+	actuator := &fakeActuator{}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorActuator(actuator))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionDecline, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	actuator.mu.Lock()
+	defer actuator.mu.Unlock()
+	if len(actuator.requests) != 0 {
+		t.Error("declining still invoked the Actuator")
+	}
+}
+
+// An Actuator failure must not undo or block the already-recorded decision.
+func TestActuatorFailureDoesNotUndoTheDecision(t *testing.T) {
+	actuator := &fakeActuator{err: errors.New("audit sink unavailable")}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorActuator(actuator))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
+	})
+
+	if opened.Decision() == nil || opened.Decision().Kind != session.DecisionApproved {
+		t.Error("an Actuator failure undid the recorded decision")
+	}
+}
+
 // fakeVerifier stands in for the deterministic SLO re-evaluation engine.
 type fakeVerifier struct {
 	result VerifyResult

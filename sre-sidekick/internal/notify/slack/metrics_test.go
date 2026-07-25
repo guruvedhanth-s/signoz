@@ -14,14 +14,17 @@ func TestMetricsRecordIncidentsDecisionsAndFollowups(t *testing.T) {
 	reader, metrics := testMetrics(t)
 	ctx := context.Background()
 
-	metrics.IncidentAnnounced(ctx, "support-agent", "diagnosed")
-	metrics.IncidentAnnounced(ctx, "checkout-api", "indeterminate")
-	metrics.DecisionRecorded(ctx, "support-agent", "approved")
-	metrics.FollowupRecorded(ctx, "support-agent", FollowupAnswered)
+	metrics.IncidentAnnounced(ctx, "support-agent", "prod", "diagnosed")
+	metrics.IncidentAnnounced(ctx, "checkout-api", "prod", "indeterminate")
+	metrics.DecisionRecorded(ctx, "support-agent", "prod", "approved")
+	metrics.FollowupRecorded(ctx, "support-agent", "prod", FollowupAnswered)
 	metrics.NotifyFailed(ctx, FailurePost)
 
 	if got := counterValue(t, reader, MetricIncidents, "service", "support-agent"); got != 1 {
 		t.Errorf("%s{service=support-agent} = %d, want 1", MetricIncidents, got)
+	}
+	if got := counterValue(t, reader, MetricIncidents, "environment", "prod"); got != 2 {
+		t.Errorf("%s{environment=prod} = %d, want 2 - every sidekick_* metric carries environment (PRD section 17)", MetricIncidents, got)
 	}
 	if got := counterValue(t, reader, MetricIncidents, "status", "indeterminate"); got != 1 {
 		t.Errorf("%s{status=indeterminate} = %d, want 1", MetricIncidents, got)
@@ -49,9 +52,11 @@ func TestNilMetricsRecordNothingAndDoNotPanic(t *testing.T) {
 	var metrics *Metrics
 	ctx := context.Background()
 
-	metrics.IncidentAnnounced(ctx, "support-agent", "diagnosed")
-	metrics.DecisionRecorded(ctx, "support-agent", "approved")
-	metrics.FollowupRecorded(ctx, "support-agent", FollowupFailed)
+	metrics.IncidentAnnounced(ctx, "support-agent", "prod", "diagnosed")
+	metrics.DecisionRecorded(ctx, "support-agent", "prod", "approved")
+	metrics.FollowupRecorded(ctx, "support-agent", "prod", FollowupFailed)
+	metrics.VerifyChecked(ctx, "support-agent", "prod", "healthy")
+	metrics.ActionRecorded(ctx, "support-agent", "prod", "restart", "recorded")
 	metrics.NotifyFailed(ctx, FailureReply)
 }
 

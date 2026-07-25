@@ -17,6 +17,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 	"go.opentelemetry.io/otel"
 
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/act"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/detect"
 	sidekickslack "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify/slack"
@@ -144,6 +145,7 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		Metrics:       signozClient,
 		SLOConfigPath: sloConfigPath,
 	}
+	actuator := &act.AdvisoryActuator{}
 
 	coordinator, err := sidekickslack.NewCoordinator(
 		slackClient, sessions, rcaAdapter,
@@ -151,6 +153,7 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
 		sidekickslack.WithCoordinatorMetrics(metrics),
 		sidekickslack.WithCoordinatorVerifier(verifier),
+		sidekickslack.WithCoordinatorActuator(actuator),
 	)
 	if err != nil {
 		return err
