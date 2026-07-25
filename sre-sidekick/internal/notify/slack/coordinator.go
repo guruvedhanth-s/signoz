@@ -32,6 +32,7 @@ type Coordinator struct {
 	sessions *session.Manager
 	rca      RCA
 	logger   *slog.Logger
+	metrics  *Metrics
 
 	defaultEnvironment string
 
@@ -57,6 +58,12 @@ func WithCoordinatorLogger(logger *slog.Logger) CoordinatorOption {
 			c.logger = logger
 		}
 	}
+}
+
+// WithCoordinatorMetrics reports incidents, decisions and follow-ups to
+// OpenTelemetry, so the loop appears on a SigNoz dashboard (PRD section 17).
+func WithCoordinatorMetrics(metrics *Metrics) CoordinatorOption {
+	return func(c *Coordinator) { c.metrics = metrics }
 }
 
 // WithMaxConcurrentAnalysis caps concurrent RCA runs.
@@ -145,6 +152,7 @@ func (c *Coordinator) Announce(ctx context.Context, d notify.Diagnosis) (*sessio
 		return nil, fmt.Errorf("slack: open session: %w", err)
 	}
 	if !existing {
+		c.metrics.IncidentAnnounced(ctx, d.Service, string(statusOr(d.Status, notify.StatusDiagnosed)))
 		c.logger.Info("incident session opened",
 			"correlation_id", d.CorrelationID,
 			"service", d.Service,
@@ -211,6 +219,7 @@ func (c *Coordinator) decide(
 		detail = "Recorded as declined. No action will be taken."
 	}
 
+	c.metrics.DecisionRecorded(ctx, s.Service, string(kind))
 	c.logger.Info("decision recorded",
 		"correlation_id", s.CorrelationID,
 		"decision", string(kind),
@@ -230,6 +239,7 @@ func (c *Coordinator) closeSession(ctx context.Context, s *session.Session, in I
 		c.postReply(ctx, in.ChannelID, in.ThreadTS, "This session was already closed.")
 		return
 	}
+	c.metrics.DecisionRecorded(ctx, s.Service, "closed")
 	c.logger.Info("session closed",
 		"correlation_id", s.CorrelationID, "user", in.UserID, "thread_ts", s.ThreadTS)
 
@@ -315,6 +325,7 @@ func (c *Coordinator) OnMessage(ctx context.Context, msg Message) {
 
 	answer, err := c.answer(ctx, request)
 	if err != nil {
+		c.metrics.FollowupRecorded(ctx, found.Service, followupOutcome(err))
 		if errors.Is(err, ErrRCAUnavailable) {
 			c.reply(ctx, found,
 				"The analysis engine is not connected, so I cannot answer follow-up questions yet. "+
@@ -332,6 +343,7 @@ func (c *Coordinator) OnMessage(ctx context.Context, msg Message) {
 		return
 	}
 
+	c.metrics.FollowupRecorded(ctx, found.Service, FollowupAnswered)
 	if err := c.sessions.AppendTurn(found, session.Turn{
 		Actor: session.ActorSidekick,
 		Text:  answer,
@@ -458,11 +470,23 @@ func (c *Coordinator) OnCommand(ctx context.Context, cmd Command) {
 // that calls this belongs to the server's lifecycle, not here.
 func (c *Coordinator) ReapIdle(ctx context.Context) {
 	for _, expired := range c.sessions.ReapIdle() {
+		c.metrics.DecisionRecorded(ctx, expired.Service, "expired")
 		c.logger.Info("session expired",
 			"correlation_id", expired.CorrelationID, "thread_ts", expired.ThreadTS)
 		c.postReply(ctx, expired.ChannelID, expired.ThreadTS,
 			"Closing this session after a period of inactivity. "+
 				"This does not silence a still-firing alert; run `/diagnose` to pick it up again.")
+	}
+}
+
+func followupOutcome(err error) string {
+	switch {
+	case errors.Is(err, ErrRCAUnavailable):
+		return FollowupUnavailable
+	case errors.Is(err, errAnalysisBusy):
+		return FollowupBusy
+	default:
+		return FollowupFailed
 	}
 }
 

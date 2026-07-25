@@ -8,6 +8,10 @@ touching `sre-sidekick/internal/notify/slack/`.
 
 Keep it updated as each phase lands.
 
+**If you are the next agent: all eight phases are built and tested, but the
+adapter has never talked to a real Slack workspace. Start at section 8, "Next
+step: the live smoke test".**
+
 **Source documents (read these for the "why"):**
 
 - `hackathon/telemetry-health-auditor-prd.md` — the product contract
@@ -60,7 +64,7 @@ Two shapes are being built, in order:
 | 5 | Inbound door: Socket Mode receiver | **done** | `feat/slack-inbound` |
 | 6 | Handlers: coordinator, decisions, follow-ups | **done** | `feat/slack-handlers` |
 | 7 | `watch` subcommand: dial Slack and supervise | **done** | `feat/slack-watch` |
-| 8 | Integration tests + `sidekick_incidents` metrics | not started | — |
+| 8 | Integration tests + metrics | **done** | `feat/slack-metrics` |
 
 Branches stack: each phase branches from the previous phase's branch, since
 none are merged to `main` yet.
@@ -674,6 +678,74 @@ redelivers, and the dedup cache absorbs it.
 
 ---
 
+## 4f. Phase 8 — metrics and end-to-end tests (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/metrics.go`, `metrics_test.go`,
+`metrics_reader_test.go`, `sre-sidekick/integration/slack_flow_test.go`
+
+### Metrics
+
+| Metric | Type | Attributes | Emitted when |
+|---|---|---|---|
+| `sidekick_incidents` | counter | `service`, `status` | an incident thread is opened (PRD section 17) |
+| `sidekick_decisions` | counter | `service`, `decision` | approved, declined, closed or expired |
+| `sidekick_sessions_active` | up/down counter | — | open and close; a value that only climbs is a session leak |
+| `sidekick_notify_failures` | counter | `kind` (post/reply/update) | a message could not be delivered |
+| `sidekick_followups` | counter | `service`, `outcome` | a follow-up turn finishes |
+
+All five carry the `sidekick_` prefix. The PRD fixes that prefix for
+`sidekick_incidents`, and metric names are effectively a public API —
+dashboards and alerts hardcode them, so one prefixed name among four
+unprefixed ones would look accidental and be expensive to correct later. The
+older unprefixed names elsewhere in the repo (`slo_burn_rate`,
+`telemetry_quality_score`) are left alone.
+
+`sidekick_notify_failures` is the counterpart to the phase 3 decision to
+*return* delivery errors: it makes a Slack outage visible on a dashboard
+rather than only in logs.
+
+**Plumbing:** injected via `WithMetrics` (client) and `WithCoordinatorMetrics`
+(coordinator). Every `*Metrics` method is **nil-safe**, so metrics are
+genuinely optional and no constructor or test needs a meter. `watch` passes
+`otel.Meter("sre-sidekick")`, which is a no-op when no provider is configured.
+
+Tests use `sdkmetric.NewManualReader`, so assertions read the values actually
+recorded rather than trusting that a call was made.
+
+### The end-to-end tests
+
+`integration/slack_flow_test.go` wires **every real component** — receiver,
+coordinator, session store, and a real `slack-go` client — against a stand-in
+Slack Web API on `httptest` plus a channel for the socket stream. No network,
+no workspace, runs in seconds.
+
+Why this exists, concretely: unit tests check each piece against a fake of its
+neighbour, so they cannot catch a seam that is wrong on *both* sides. That is
+not hypothetical here — the phase 5 `acker` interface omitted the error that
+`socketmode.Client.Ack` returns, so the real client never satisfied it, and
+every unit test still passed because the fake matched the wrong interface.
+
+Scenarios, following the PRD section 23 demo script:
+
+1. healthy run → nothing is posted
+2. indeterminate → no cause, no fix, no approve button, missing evidence listed
+3. **diagnose → approve** → session keyed on the returned message ts, buttons
+   retired by a real `chat.update`, confirmation says nothing was executed
+4. re-fired alert → one thread, one session, frozen diagnosis untouched
+5. follow-up Q&A → pinned grounding in the request, history accumulates,
+   participants recorded
+6. typed "approve" → nudge, no decision recorded
+7. restart → lost-session notice in our thread, silence in a thread we did not
+   start
+8. idle expiry → notice in-thread, with the "does not silence the alert" caveat
+9. two incidents → fully independent
+10. second decision → refused, first stands
+11. post failure → reported, and no session left behind
+12. own message echo → ignored
+13. redelivered envelope → answered once
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -759,7 +831,128 @@ with `connections:write`, subscribe to `message.channels` (and
 
 ---
 
-## 8. Changelog
+## 8. Next step: the live smoke test (not done yet)
+
+**Read this first if you are picking the work up.** All eight phases are
+complete and every test passes, but **the adapter has never spoken to a real
+Slack workspace**. Every test fakes Slack. This is the single largest remaining
+risk and it should be the next thing anyone does.
+
+### Why it matters
+
+The tests prove the code is internally consistent. They cannot prove that
+Slack agrees with our assumptions about scopes, event subscriptions, block
+payload validation or Socket Mode setup. Phase 7 already showed how this class
+of bug hides: the `acker` interface omitted the error the real Slack client
+returns, and every unit test passed anyway because the fake matched the wrong
+interface. Expect at least one such surprise on first contact.
+
+### 8.1 Slack app setup
+
+At <https://api.slack.com/apps>, create an app in the target workspace and:
+
+1. **Socket Mode** → enable it. No Request URL is needed anywhere.
+2. **App-level token** → generate one with the `connections:write` scope. This
+   is the `xapp-...` token.
+3. **Bot token scopes** (OAuth & Permissions):
+   - `chat:write` — post and update messages
+   - `channels:history` — read threaded replies in public channels
+   - `groups:history` — same, if the channel is private
+   - `commands` — the slash command
+4. **Event subscriptions** → subscribe the bot to `message.channels` (and
+   `message.groups` for a private channel).
+5. **Interactivity** → enable it, so button clicks are delivered.
+6. **Slash command** → register `/diagnose`, description
+   `Diagnose a service`, usage hint `<service> [environment]`.
+7. Install the app, then **invite the bot to the channel**
+   (`/invite @your-bot`). A missing invite surfaces as `not_in_channel`,
+   which the client deliberately does not retry.
+
+Set the channel in `configs/sidekick.yaml` (`default_channel`). A channel ID
+(`C0…`) is more robust than a `#name`.
+
+### 8.2 Run it
+
+```bash
+cd sre-sidekick
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_APP_TOKEN=xapp-...
+go run ./cmd/reliability-agent watch --config configs/sidekick.yaml
+```
+
+Expect `slack adapter starting` then `slack socket connected` in the log. If a
+token is missing or the two are swapped, startup fails immediately and names
+the variable and the expected prefix.
+
+### 8.3 The missing piece: something to announce
+
+Nothing in the merged code produces a `notify.Diagnosis` yet — the alert
+webhook belongs to the detection track and the analysis engine is on another
+branch. So a live test currently has nothing to post.
+
+**Recommended: add a temporary `--demo-announce <service>` flag to
+`runWatch`.** After the socket connects, it builds a hard-coded
+`notify.Diagnosis` (the one in `integration/slack_flow_test.go`'s
+`diagnosisFor` is ready to copy) and calls `coordinator.Announce`. That gives a
+real message with real buttons in a real channel, which is all the smoke test
+needs. Mark it clearly as demo-only, keep it behind the flag so it can never
+fire by accident, and delete it once the detection track lands.
+
+Do **not** be tempted to make the fake diagnosis look real enough to demo to an
+audience without saying so. Invented facts in a grounded-reliability tool are
+the exact failure the PRD exists to prevent.
+
+### 8.4 What to verify, in order
+
+| # | Action | Expected |
+|---|---|---|
+| 1 | start `watch` | `slack socket connected`, no auth errors |
+| 2 | announce a demo diagnosis | message in the channel: header, grounding fields, root cause, evidence link, advisory action, three buttons, correlation footer |
+| 3 | check the numbers | burn rate reads `14.2x`, budget reads `-3.4%`, sign preserved |
+| 4 | click the SigNoz evidence link | opens; if not, the link builder needs a real SigNoz base URL |
+| 5 | reply in the thread with a question | bot answers "the analysis engine is not connected" — correct until the RCA branch lands |
+| 6 | type `approve` in the thread | bot points at the buttons; **no** decision recorded |
+| 7 | click **Approve** | original message rewritten, buttons gone, replaced by "Approved by @you"; thread reply says nothing was executed |
+| 8 | click **Approve** again | "Already approved by @you at HH:MM" |
+| 9 | announce the same service again | notice lands in the **existing** thread, no second message |
+| 10 | `/diagnose support-agent` | acknowledgement in channel, then the engine-not-connected message |
+| 11 | leave a session idle past `session_ttl` | expiry notice in the thread, with the "does not silence the alert" caveat |
+| 12 | restart `watch`, reply in the old thread | "this session was lost, run `/diagnose`" |
+| 13 | reply in a thread the bot did not start | complete silence |
+| 14 | stop with Ctrl-C | `slack adapter stopped`, no panic, no hang |
+
+### 8.5 Likely first failures, and where to look
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `invalid_auth` at startup | wrong or revoked token | check both tokens and their prefixes |
+| socket connects, no events arrive | event subscription missing, or bot not in channel | add `message.channels`, `/invite` the bot |
+| `not_in_channel` on post | bot not invited | `/invite`; the client does not retry this, by design |
+| `missing_scope` | a bot scope was not granted | add it and **reinstall** the app |
+| button clicks do nothing | Interactivity not enabled | enable it in the app settings |
+| `invalid_blocks` | a block payload Slack rejects | log the rendered blocks and compare against Block Kit Builder |
+| bot answers its own posts | the bot-message filter failed | check `bot_id`/`subtype` on the inbound event in `events.go` |
+
+### 8.6 Also still outstanding
+
+- **Run the test suite under `-race`.** It has never run: the development
+  machine is Windows without a C toolchain (`cgo.exe: exit status 2`). The
+  concurrency work — session locks, the worker pool, the decision race — is
+  covered by tests but only *proven* under the race detector. Run it in CI or
+  on Linux before trusting it under load.
+- **Attach the analysis engine.** Replace `UnavailableRCA{}` in
+  `cmd/reliability-agent/watch.go` with an adapter implementing the two-method
+  `RCA` interface. `FollowupRequest` is a flat value, so the engine imports
+  nothing from the session package.
+- **Call `Announce` from the alert path** once the detection track's webhook
+  exists.
+- **Phase 3 hardening if it is ever needed:** session persistence across
+  restarts (E3), approver authorisation groups (E18), history summarisation for
+  very long threads (E10).
+
+---
+
+## 9. Changelog
 
 | Date | Phase | Commit | Summary |
 |---|---|---|---|
@@ -767,6 +960,7 @@ with `connections:write`, subscribe to `message.channels` (and
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
 | — | 4 | `2d01cc7` | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
+| — | 8 | `ea46d1a` | Metrics for incidents, decisions, sessions, follow-ups and delivery failures; end-to-end tests wiring every real component against a stand-in Slack API |
 | — | 7 | `092b045` | `watch` subcommand: dials Socket Mode, supervises the receiver and the idle sweep, drains on shutdown; fixes the `acker` signature so the real client satisfies it |
 | — | 6 | `ad414b6` | Coordinator: alert-to-thread announcements with dedup, button decisions with retired buttons, threaded follow-ups behind the RCA seam, `/diagnose`, idle expiry notices, analysis concurrency cap |
 | — | 5 | `9435ddc` | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
