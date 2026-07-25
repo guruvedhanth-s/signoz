@@ -281,9 +281,21 @@ func gatherEvidenceFromSnapshot(inc Incident, snapshot evidence.Snapshot) []noti
 	return out
 }
 
+// evidenceNote builds the Note for one snapshot-derived evidence item.
+// r.Selector comes straight from a raw telemetry field (name, span_name,
+// metric_name, operation_name - see normalizeSignal in
+// internal/source/signoz/telemetry.go) written by the instrumented
+// application, so it is exactly as attacker-controllable as any other
+// telemetry text: this is the same class of injection risk sanitize.go
+// exists to defend against for the MCP evidence path
+// (evidence_mcp.go), but this M1/default path (used whenever
+// Agent.EvidenceSource is unset - i.e. whenever --mcp-url is not
+// configured) built its Note directly from the raw field with no
+// sanitization at all. SanitizeNote strips control characters and caps
+// the length, same as every other evidence Note in this package.
 func evidenceNote(kind notify.EvidenceKind, r evidence.Record) string {
 	if r.Selector != "" {
-		return fmt.Sprintf("%s: %s", kind, r.Selector)
+		return SanitizeNote(fmt.Sprintf("%s: %s", kind, r.Selector))
 	}
 	return string(kind)
 }

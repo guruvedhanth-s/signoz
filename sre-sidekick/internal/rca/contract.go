@@ -18,12 +18,14 @@ import (
 //     upstream from the telemetry snapshot, with stable IDs and SigNoz
 //     links. The reasoner cannot add, remove, or relink evidence.
 //   - RootCause, ProposedFix, and Candidates' text is copied from the
-//     model, but any EvidenceIDs a candidate cites that do not resolve to
-//     an ev ID are dropped. If every cited id for a candidate is dropped,
-//     the candidate is kept with an empty EvidenceIDs list rather than
-//     discarded - its root-cause text may still be useful even when its
-//     citations do not check out; it is simply presented without
-//     provenance.
+//     model, but any EvidenceIDs a candidate (or the top-level RootCause
+//     itself) cites that do not resolve to an ev ID are dropped. If every
+//     cited id is dropped, the RootCause or candidate is kept with an
+//     empty EvidenceIDs list rather than discarded - its text may still be
+//     useful even when its citations do not check out; it is simply
+//     presented without provenance. The top-level RootCause is not exempt
+//     from this check just because it is the single conclusion rather than
+//     one of several candidates.
 //   - Reversible is NOT taken from the model: it is decided by
 //     reversibleForFix (reversible.go), a small deterministic allowlist of
 //     clearly-reversible action phrasing (PRD 13.3). The model never sets
@@ -47,6 +49,7 @@ func Render(inc Incident, ev []notify.Evidence, md ModelDiagnosis) notify.Diagno
 		Grounding:     inc.Grounding,
 		RootCause:     md.RootCause,
 		ProposedFix:   md.ProposedFix,
+		EvidenceIDs:   filterKnownIDs(md.EvidenceIDs, known),
 		Reversible:    reversibleForFix(md.ProposedFix),
 		Candidates:    renderCandidates(md.Candidates, known),
 		Evidence:      ev,

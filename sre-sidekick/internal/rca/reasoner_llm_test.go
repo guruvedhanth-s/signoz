@@ -90,6 +90,21 @@ func TestLLMReasoner_Reason_ParsesValidJSONResponse(t *testing.T) {
 	}
 }
 
+// TestParseModelDiagnosis_TopLevelEvidenceIDs locks in the wire schema
+// addition: a top-level "evidence_ids" field, parsed the same way a
+// candidate's evidence_ids are, so the model can (and the system prompt
+// now instructs it to) cite evidence for its single stated root cause -
+// not just for candidates in a ranked-hypotheses response.
+func TestParseModelDiagnosis_TopLevelEvidenceIDs(t *testing.T) {
+	md, err := parseModelDiagnosis(`{"root_cause": "x", "proposed_fix": "y", "evidence_ids": ["e1", "e2"]}`)
+	if err != nil {
+		t.Fatalf("parseModelDiagnosis: %v", err)
+	}
+	if want := []string{"e1", "e2"}; !equalStrings(md.EvidenceIDs, want) {
+		t.Errorf("EvidenceIDs = %v, want %v", md.EvidenceIDs, want)
+	}
+}
+
 func TestLLMReasoner_Reason_RetriesOnceOnMalformedJSON(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
