@@ -3,10 +3,9 @@
 //
 // Secrets are never stored in this file and never held in the Config struct.
 // The YAML only names the *environment variables* that carry the Slack bot
-// token and signing secret (`bot_token_env`, `signing_secret_env`); the values
-// are read from the process environment via BotToken() and SigningSecret().
-// That way a Config value can be logged or marshalled without leaking
-// credentials.
+// token and app-level token (`bot_token_env`, `app_token_env`); the values are
+// read from the process environment via BotToken() and AppToken(). That way a
+// Config value can be logged or marshalled without leaking credentials.
 //
 // Validation is strict about credentials: loading fails when a named
 // environment variable is missing, so a misconfigured deployment is caught at
@@ -25,9 +24,10 @@ import (
 // Defaults applied when a field is omitted from the YAML file.
 const (
 	DefaultBotTokenEnv      = "SLACK_BOT_TOKEN"
-	DefaultSigningSecretEnv = "SLACK_SIGNING_SECRET"
+	DefaultAppTokenEnv      = "SLACK_APP_TOKEN"
 	DefaultSessionTTL       = "30m"
 	DefaultMaxConcurrentRCA = 5
+	DefaultEnvironment      = "prod"
 )
 
 // Config is the root of `sidekick.yaml`.
@@ -43,17 +43,28 @@ type NotifyConfig struct {
 
 // SlackConfig configures the Slack adapter (Track D).
 type SlackConfig struct {
-	// BotTokenEnv names the env var holding the Slack bot token (xoxb-...).
-	// The token itself is never read from YAML.
+	// BotTokenEnv names the env var holding the Slack bot token (xoxb-...),
+	// used for outbound calls such as chat.postMessage. The token itself is
+	// never read from YAML.
 	BotTokenEnv string `yaml:"bot_token_env" json:"bot_token_env"`
-	// SigningSecretEnv names the env var holding the Slack signing secret,
-	// used to verify every inbound request (session design section 3.1:
-	// signature verification is non-negotiable).
-	SigningSecretEnv string `yaml:"signing_secret_env" json:"signing_secret_env"`
+	// AppTokenEnv names the env var holding the Slack app-level token
+	// (xapp-...), used to open the Socket Mode connection.
+	//
+	// Socket Mode is how this adapter receives events: the sidekick dials out
+	// to Slack over a WebSocket, so there is no public HTTP endpoint to
+	// expose, authenticate or attack. That is also why there is no signing
+	// secret here - request signatures exist to authenticate an inbound
+	// endpoint, and there isn't one.
+	AppTokenEnv string `yaml:"app_token_env" json:"app_token_env"`
 	// DefaultChannel is the on-call channel diagnoses are posted to. Sessions
 	// default to a channel thread, not a DM, so the whole team shares context
 	// (session design edge case E14).
 	DefaultChannel string `yaml:"default_channel" json:"default_channel"`
+	// DefaultEnvironment is the environment assumed when a slash command does
+	// not name one, e.g. `/diagnose support-agent`. Required because an SLO is
+	// always scoped to an environment: diagnosing the wrong one would report
+	// facts about the wrong system.
+	DefaultEnvironment string `yaml:"default_environment" json:"default_environment"`
 	// SessionTTL is how long a session may sit idle before the reaper closes
 	// it (session design edge case E4). Go duration string, e.g. "30m".
 	SessionTTL string `yaml:"session_ttl" json:"session_ttl"`
@@ -100,11 +111,14 @@ func (c *Config) applyDefaults() {
 	if strings.TrimSpace(slack.BotTokenEnv) == "" {
 		slack.BotTokenEnv = DefaultBotTokenEnv
 	}
-	if strings.TrimSpace(slack.SigningSecretEnv) == "" {
-		slack.SigningSecretEnv = DefaultSigningSecretEnv
+	if strings.TrimSpace(slack.AppTokenEnv) == "" {
+		slack.AppTokenEnv = DefaultAppTokenEnv
 	}
 	if strings.TrimSpace(slack.SessionTTL) == "" {
 		slack.SessionTTL = DefaultSessionTTL
+	}
+	if strings.TrimSpace(slack.DefaultEnvironment) == "" {
+		slack.DefaultEnvironment = DefaultEnvironment
 	}
 	if slack.MaxConcurrentRCA == 0 {
 		slack.MaxConcurrentRCA = DefaultMaxConcurrentRCA
@@ -132,10 +146,13 @@ func (s SlackConfig) Validate() error {
 	if strings.ContainsAny(s.DefaultChannel, " \t\n") {
 		return fmt.Errorf("default_channel %q must not contain whitespace", s.DefaultChannel)
 	}
+	if strings.ContainsAny(s.DefaultEnvironment, " \t\n") {
+		return fmt.Errorf("default_environment %q must not contain whitespace", s.DefaultEnvironment)
+	}
 	if err := validateEnvName("bot_token_env", s.BotTokenEnv); err != nil {
 		return err
 	}
-	if err := validateEnvName("signing_secret_env", s.SigningSecretEnv); err != nil {
+	if err := validateEnvName("app_token_env", s.AppTokenEnv); err != nil {
 		return err
 	}
 	if _, err := s.SessionTTLDuration(); err != nil {
@@ -147,7 +164,7 @@ func (s SlackConfig) Validate() error {
 	if _, err := s.BotToken(); err != nil {
 		return err
 	}
-	if _, err := s.SigningSecret(); err != nil {
+	if _, err := s.AppToken(); err != nil {
 		return err
 	}
 	return nil
@@ -172,13 +189,29 @@ func (s SlackConfig) SessionTTLDuration() (time.Duration, error) {
 // BotToken reads the Slack bot token from the environment variable named by
 // BotTokenEnv. The error names the variable, never the value.
 func (s SlackConfig) BotToken() (string, error) {
-	return lookupSecret(s.BotTokenEnv)
+	token, err := lookupSecret(s.BotTokenEnv)
+	if err != nil {
+		return "", err
+	}
+	// Pasting the app-level token into the bot token slot is the most common
+	// setup mistake, and Slack's error for it is unhelpful.
+	if err := requirePrefix(s.BotTokenEnv, token, "xoxb-", "bot token"); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
-// SigningSecret reads the Slack signing secret from the environment variable
-// named by SigningSecretEnv. The error names the variable, never the value.
-func (s SlackConfig) SigningSecret() (string, error) {
-	return lookupSecret(s.SigningSecretEnv)
+// AppToken reads the Slack app-level token used to open the Socket Mode
+// connection. The error names the variable, never the value.
+func (s SlackConfig) AppToken() (string, error) {
+	token, err := lookupSecret(s.AppTokenEnv)
+	if err != nil {
+		return "", err
+	}
+	if err := requirePrefix(s.AppTokenEnv, token, "xapp-", "app-level token"); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 func lookupSecret(name string) (string, error) {
@@ -187,6 +220,18 @@ func lookupSecret(name string) (string, error) {
 		return "", fmt.Errorf("environment variable %s is not set", name)
 	}
 	return value, nil
+}
+
+// requirePrefix checks a token's type without ever putting its value in the
+// error message.
+func requirePrefix(envName, token, prefix, kind string) error {
+	if strings.HasPrefix(token, prefix) {
+		return nil
+	}
+	return fmt.Errorf(
+		"environment variable %s does not hold a Slack %s: expected a value starting with %q",
+		envName, kind, prefix,
+	)
 }
 
 func validateEnvName(field, name string) error {

@@ -19,7 +19,7 @@ notify:
 func setCredentials(t *testing.T) {
 	t.Helper()
 	t.Setenv(DefaultBotTokenEnv, "xoxb-test-token")
-	t.Setenv(DefaultSigningSecretEnv, "test-signing-secret")
+	t.Setenv(DefaultAppTokenEnv, "xapp-test-token")
 }
 
 func TestParseAppliesDefaults(t *testing.T) {
@@ -34,8 +34,8 @@ func TestParseAppliesDefaults(t *testing.T) {
 	if slack.BotTokenEnv != DefaultBotTokenEnv {
 		t.Errorf("BotTokenEnv = %q, want %q", slack.BotTokenEnv, DefaultBotTokenEnv)
 	}
-	if slack.SigningSecretEnv != DefaultSigningSecretEnv {
-		t.Errorf("SigningSecretEnv = %q, want %q", slack.SigningSecretEnv, DefaultSigningSecretEnv)
+	if slack.AppTokenEnv != DefaultAppTokenEnv {
+		t.Errorf("AppTokenEnv = %q, want %q", slack.AppTokenEnv, DefaultAppTokenEnv)
 	}
 	if slack.MaxConcurrentRCA != DefaultMaxConcurrentRCA {
 		t.Errorf("MaxConcurrentRCA = %d, want %d", slack.MaxConcurrentRCA, DefaultMaxConcurrentRCA)
@@ -51,13 +51,13 @@ func TestParseAppliesDefaults(t *testing.T) {
 
 func TestParseFullConfig(t *testing.T) {
 	t.Setenv("CUSTOM_TOKEN", "xoxb-custom")
-	t.Setenv("CUSTOM_SECRET", "custom-secret")
+	t.Setenv("CUSTOM_APP_TOKEN", "xapp-custom")
 
 	yaml := `
 notify:
   slack:
     bot_token_env: CUSTOM_TOKEN
-    signing_secret_env: CUSTOM_SECRET
+    app_token_env: CUSTOM_APP_TOKEN
     default_channel: "C0123456789"
     session_ttl: 90s
     max_concurrent_rca: 2
@@ -71,8 +71,8 @@ notify:
 	if slack.BotTokenEnv != "CUSTOM_TOKEN" {
 		t.Errorf("BotTokenEnv = %q", slack.BotTokenEnv)
 	}
-	if slack.SigningSecretEnv != "CUSTOM_SECRET" {
-		t.Errorf("SigningSecretEnv = %q", slack.SigningSecretEnv)
+	if slack.AppTokenEnv != "CUSTOM_APP_TOKEN" {
+		t.Errorf("AppTokenEnv = %q", slack.AppTokenEnv)
 	}
 	if slack.DefaultChannel != "C0123456789" {
 		t.Errorf("DefaultChannel = %q", slack.DefaultChannel)
@@ -142,6 +142,11 @@ func TestParseErrors(t *testing.T) {
 			yaml:    "notify:\n  slack:\n    default_channel: \"#x\"\n    bot_token_env: MISSING_TOKEN_VAR\n",
 			wantErr: "environment variable MISSING_TOKEN_VAR is not set",
 		},
+		{
+			name:    "app token env var not set",
+			yaml:    "notify:\n  slack:\n    default_channel: \"#x\"\n    app_token_env: MISSING_APP_TOKEN_VAR\n",
+			wantErr: "environment variable MISSING_APP_TOKEN_VAR is not set",
+		},
 	}
 
 	for _, tc := range cases {
@@ -161,7 +166,7 @@ func TestParseErrors(t *testing.T) {
 // even though the file itself is well formed.
 func TestParseFailsWithoutCredentials(t *testing.T) {
 	t.Setenv(DefaultBotTokenEnv, "")
-	t.Setenv(DefaultSigningSecretEnv, "secret")
+	t.Setenv(DefaultAppTokenEnv, "xapp-test-token")
 
 	_, err := Parse([]byte(minimalYAML))
 	if err == nil {
@@ -172,11 +177,38 @@ func TestParseFailsWithoutCredentials(t *testing.T) {
 	}
 
 	t.Setenv(DefaultBotTokenEnv, "xoxb-test-token")
-	t.Setenv(DefaultSigningSecretEnv, "")
+	t.Setenv(DefaultAppTokenEnv, "")
 	if _, err := Parse([]byte(minimalYAML)); err == nil {
-		t.Fatal("Parse() error = nil, want missing signing secret error")
-	} else if !strings.Contains(err.Error(), DefaultSigningSecretEnv) {
-		t.Errorf("Parse() error = %q, want it to name %s", err, DefaultSigningSecretEnv)
+		t.Fatal("Parse() error = nil, want missing app token error")
+	} else if !strings.Contains(err.Error(), DefaultAppTokenEnv) {
+		t.Errorf("Parse() error = %q, want it to name %s", err, DefaultAppTokenEnv)
+	}
+}
+
+// Pasting the bot token into the app token slot (or the reverse) is the most
+// common setup mistake; it must be caught at load with a clear message rather
+// than surfacing later as an opaque Slack connection error.
+func TestTokenPrefixesAreChecked(t *testing.T) {
+	t.Setenv(DefaultBotTokenEnv, "xapp-wrong-slot")
+	t.Setenv(DefaultAppTokenEnv, "xapp-test-token")
+
+	_, err := Parse([]byte(minimalYAML))
+	if err == nil {
+		t.Fatal("Parse() error = nil, want the swapped bot token rejected")
+	}
+	if !strings.Contains(err.Error(), "xoxb-") {
+		t.Errorf("error = %q, want it to state the expected prefix", err)
+	}
+	if strings.Contains(err.Error(), "wrong-slot") {
+		t.Errorf("error = %q, want it to not echo the token value", err)
+	}
+
+	t.Setenv(DefaultBotTokenEnv, "xoxb-test-token")
+	t.Setenv(DefaultAppTokenEnv, "xoxb-wrong-slot")
+	if _, err := Parse([]byte(minimalYAML)); err == nil {
+		t.Fatal("Parse() error = nil, want the swapped app token rejected")
+	} else if !strings.Contains(err.Error(), "xapp-") {
+		t.Errorf("error = %q, want it to state the expected prefix", err)
 	}
 }
 
@@ -246,13 +278,13 @@ func TestSecretsComeFromEnvironment(t *testing.T) {
 		t.Errorf("BotToken() = %q", token)
 	}
 
-	t.Setenv(DefaultSigningSecretEnv, "  s3cr3t  ")
-	secret, err := slack.SigningSecret()
+	t.Setenv(DefaultAppTokenEnv, "  xapp-s3cr3t  ")
+	appToken, err := slack.AppToken()
 	if err != nil {
-		t.Fatalf("SigningSecret() error = %v", err)
+		t.Fatalf("AppToken() error = %v", err)
 	}
-	if secret != "s3cr3t" {
-		t.Errorf("SigningSecret() = %q, want trimmed value", secret)
+	if appToken != "xapp-s3cr3t" {
+		t.Errorf("AppToken() = %q, want trimmed value", appToken)
 	}
 }
 
@@ -273,7 +305,7 @@ func TestConfigNeverHoldsSecretValues(t *testing.T) {
 func sprint(cfg Config) string {
 	var b strings.Builder
 	b.WriteString(cfg.Notify.Slack.BotTokenEnv)
-	b.WriteString(cfg.Notify.Slack.SigningSecretEnv)
+	b.WriteString(cfg.Notify.Slack.AppTokenEnv)
 	b.WriteString(cfg.Notify.Slack.DefaultChannel)
 	b.WriteString(cfg.Notify.Slack.SessionTTL)
 	return b.String()

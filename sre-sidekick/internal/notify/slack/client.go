@@ -46,6 +46,18 @@ type poster interface {
 	PostMessageContext(
 		ctx context.Context, channelID string, options ...slack.MsgOption,
 	) (string, string, error)
+
+	// UpdateMessageContext rewrites an already-posted message, used to retire
+	// the decision buttons once a decision has been made.
+	UpdateMessageContext(
+		ctx context.Context, channelID, timestamp string, options ...slack.MsgOption,
+	) (string, string, string, error)
+
+	// GetConversationRepliesContext reads a thread, used only to check whether
+	// an unknown thread was one of ours before speaking in it.
+	GetConversationRepliesContext(
+		ctx context.Context, params *slack.GetConversationRepliesParameters,
+	) ([]slack.Message, bool, string, error)
 }
 
 var _ notify.Notifier = (*Client)(nil)
@@ -236,12 +248,93 @@ func (c *Client) PostIndeterminate(
 	})
 }
 
+// PostThreadReply posts a plain-text reply inside an existing thread, which is
+// how the sidekick answers a follow-up without starting a new session.
+func (c *Client) PostThreadReply(
+	ctx context.Context, channelID, threadTS, text string,
+) (PostRef, error) {
+	return c.post(ctx, message{
+		kind:     "thread_reply",
+		channel:  channelID,
+		threadTS: threadTS,
+		fallback: text,
+	})
+}
+
+// UpdateMessage rewrites an existing message. It is used to replace the
+// approve/decline buttons with the recorded outcome, so a decided incident
+// never shows a live-looking button that silently does nothing.
+//
+// Updates are retried on the same terms as posts, but a failure here is not
+// fatal to the decision: the decision is already recorded in the session and
+// the audit log, and the thread reply states it too.
+func (c *Client) UpdateMessage(
+	ctx context.Context, channelID, timestamp, fallback string, blocks []slack.Block,
+) error {
+	_, err := c.post(ctx, message{
+		kind:      "update",
+		channel:   channelID,
+		updateTS:  timestamp,
+		fallback:  fallback,
+		blocks:    blocks,
+		isUpdate:  true,
+		suppressN: true,
+	})
+	return err
+}
+
+// ThreadRootPostedByUs reports whether the root message of a thread was posted
+// by this bot.
+//
+// It exists for one narrow case: a human replies in a thread the sidekick has
+// no session for, typically after a restart. Answering every unknown thread
+// would make the bot speak in unrelated conversations; staying silent leaves a
+// user talking to a wall. Checking the root lets it answer only where it is
+// actually a participant.
+func (c *Client) ThreadRootPostedByUs(ctx context.Context, channelID, threadTS string) (bool, error) {
+	messages, _, _, err := c.api.GetConversationRepliesContext(
+		ctx,
+		&slack.GetConversationRepliesParameters{
+			ChannelID: channelID,
+			Timestamp: threadTS,
+			Limit:     1,
+			Inclusive: true,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("slack: read thread %s/%s: %w", channelID, threadTS, err)
+	}
+	if len(messages) == 0 {
+		return false, nil
+	}
+	root := messages[0]
+	if strings.TrimSpace(root.BotID) == "" {
+		return false, nil
+	}
+	// The sidekick only ever roots a thread with its own diagnosis message, so
+	// a bot-authored root in a channel it posts to is ours.
+	return true, nil
+}
+
+// Channel reports the channel diagnoses are posted to.
+func (c *Client) Channel() string { return c.channel }
+
 type message struct {
 	correlationID string
 	kind          string
 	service       string
 	fallback      string
 	blocks        []slack.Block
+
+	// channel overrides the configured default channel.
+	channel string
+	// threadTS posts the message as a reply inside a thread.
+	threadTS string
+	// updateTS names the message to rewrite instead of posting a new one.
+	updateTS string
+	isUpdate bool
+	// suppressN keeps routine updates out of the info log.
+	suppressN bool
 }
 
 // post sends one message, retrying transient failures within the policy
@@ -255,15 +348,11 @@ func (c *Client) post(ctx context.Context, msg message) (PostRef, error) {
 			return PostRef{}, c.fail(msg, attempt, err)
 		}
 
-		channel, timestamp, err := c.api.PostMessageContext(
-			ctx,
-			c.channel,
-			// The fallback text is what push notifications and screen readers
-			// show; a Block Kit message without it arrives blank on mobile.
-			slack.MsgOptionText(msg.fallback, false),
-			slack.MsgOptionBlocks(msg.blocks...),
-		)
+		channel, timestamp, err := c.send(ctx, msg)
 		if err == nil {
+			if msg.suppressN {
+				return PostRef{Channel: channel, Timestamp: timestamp}, nil
+			}
 			c.logger.Info("slack message posted",
 				"correlation_id", msg.correlationID,
 				"kind", msg.kind,
@@ -306,15 +395,45 @@ func (c *Client) post(ctx context.Context, msg message) (PostRef, error) {
 	return PostRef{}, c.fail(msg, c.retry.MaxAttempts, lastErr)
 }
 
+// send performs one attempt: a post, a threaded reply, or an update.
+func (c *Client) send(ctx context.Context, msg message) (string, string, error) {
+	channel := msg.channel
+	if strings.TrimSpace(channel) == "" {
+		channel = c.channel
+	}
+
+	// The fallback text is what push notifications and screen readers show; a
+	// Block Kit message without it arrives blank on mobile.
+	options := []slack.MsgOption{slack.MsgOptionText(msg.fallback, false)}
+	if len(msg.blocks) > 0 {
+		options = append(options, slack.MsgOptionBlocks(msg.blocks...))
+	}
+	if msg.threadTS != "" {
+		options = append(options, slack.MsgOptionTS(msg.threadTS))
+	}
+
+	if msg.isUpdate {
+		updatedChannel, timestamp, _, err := c.api.UpdateMessageContext(
+			ctx, channel, msg.updateTS, options...,
+		)
+		return updatedChannel, timestamp, err
+	}
+	return c.api.PostMessageContext(ctx, channel, options...)
+}
+
 // fail logs the undelivered message and wraps the error. The log record exists
 // so the failure is in the audit trail regardless of what the caller does with
 // the returned error (PRD section 20).
 func (c *Client) fail(msg message, attempts int, err error) error {
+	channel := msg.channel
+	if strings.TrimSpace(channel) == "" {
+		channel = c.channel
+	}
 	c.logger.Error("slack message not delivered",
 		"correlation_id", msg.correlationID,
 		"kind", msg.kind,
 		"service", msg.service,
-		"channel", c.channel,
+		"channel", channel,
 		"attempts", attempts,
 		"error", err.Error(),
 	)

@@ -57,9 +57,9 @@ Two shapes are being built, in order:
 | 2 | Block Kit rendering (pure functions) | **done** | `feat/slack-blocks` |
 | 3 | Slack client + `notify.Notifier` implementation | **done** | `feat/slack-client` |
 | 4 | Session store (`internal/session`) | **done** | `feat/slack-sessions` |
-| 5 | Inbound HTTP (signature verify, 3s ack, dedup) | not started | — |
-| 6 | Handlers (interactivity, events, `/diagnose`) | not started | — |
-| 7 | Wire into the API server + `watch` subcommand | not started | — |
+| 5 | Inbound door: Socket Mode receiver | **done** | `feat/slack-inbound` |
+| 6 | Handlers: coordinator, decisions, follow-ups | **done** | `feat/slack-handlers` |
+| 7 | `watch` subcommand: dial Slack and supervise | **done** | `feat/slack-watch` |
 | 8 | Integration tests + `sidekick_incidents` metrics | not started | — |
 
 Branches stack: each phase branches from the previous phase's branch, since
@@ -79,8 +79,20 @@ secret, err := cfg.Notify.Slack.SigningSecret() // reads $SLACK_SIGNING_SECRET
 ttl, err := cfg.Notify.Slack.SessionTTLDuration()
 ```
 
-Shape (`notify.slack.*` in YAML): `bot_token_env`, `signing_secret_env`,
-`default_channel`, `session_ttl`, `max_concurrent_rca`.
+Shape (`notify.slack.*` in YAML): `bot_token_env`, `app_token_env`,
+`default_channel`, `default_environment`, `session_ttl`,
+`max_concurrent_rca`.
+
+`default_environment` (phase 6) is what `/diagnose support-agent` resolves to.
+An SLO is always scoped to an environment, so guessing would report facts
+about the wrong system.
+
+`app_token_env` was added in phase 5 and **`signing_secret_env` was removed**:
+request signatures authenticate an inbound HTTP endpoint, and Socket Mode
+means there isn't one. Both tokens have their prefix checked (`xoxb-` for the
+bot token, `xapp-` for the app-level token) because swapping them is the most
+common setup mistake and Slack's own error for it is unhelpful. The check
+never echoes the token value.
 
 ### Decisions
 
@@ -385,6 +397,283 @@ capped is the paid analysis, not the map entry.
 
 ---
 
+## 4c. Phase 5 — the inbound door, Socket Mode (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/socket.go`, `events.go`,
+`socket_test.go`
+
+### Why Socket Mode, and what it removes
+
+The adapter receives events over **Slack Socket Mode**: the sidekick dials
+*out* to Slack over a WebSocket and Slack pushes envelopes down it.
+
+This was a deliberate choice over HTTP request URLs:
+
+- **No public endpoint.** Nothing to expose, no TLS to terminate, no ngrok or
+  tunnel for a laptop demo, and nothing inbound to attack.
+- **No signature verification, and none needed.** Signature checks exist to
+  authenticate an inbound endpoint; the socket is authenticated once, when it
+  is dialled, by the app-level token. That is why `verify.go`, the replay
+  window, body caps and `url_verification` do not exist in this codebase.
+- **Trade-off:** Socket Mode cannot be used by an app distributed in Slack's
+  public directory. If this ever ships publicly, HTTP routes plus signature
+  verification come back — and the `Handler` seam below means only the
+  transport file changes.
+
+### What Socket Mode does *not* change
+
+- **Ack within three seconds.** Slack redelivers anything unacked, so every
+  envelope is acked immediately and the work is dispatched asynchronously
+  (**E11**).
+- **Deduplication.** Because Slack redelivers, and a reconnect can replay,
+  deliveries are deduped by `event_id`, falling back to `envelope_id`. Without
+  it the same human turn is processed twice.
+- **Bounded work.** A burst must not spawn unbounded goroutines or unbounded
+  paid analysis (**E8**).
+
+### The seam
+
+```go
+type Handler interface {
+    OnMessage(ctx context.Context, msg Message)
+    OnInteraction(ctx context.Context, interaction Interaction)
+    OnCommand(ctx context.Context, cmd Command)
+}
+
+receiver, err := slack.NewReceiver(events, acker, handler, opts...)
+err = receiver.Run(ctx)   // blocks until ctx is cancelled or the stream closes
+```
+
+The event stream and the `acker` are **injected**, not constructed inside the
+receiver. `*socketmode.Client` satisfies both in production; a plain channel
+and a recorder satisfy them in tests. That is why the entire inbound path is
+tested with no WebSocket and no network.
+
+`Message`, `Interaction` and `Command` (`events.go`) are the adapter's own
+narrow structs, so phase 6's logic is not coupled to slack-go's JSON shapes
+and can be tested by constructing a three-field value.
+
+### Behaviour worth knowing before editing
+
+- **Ack happens before dispatch, always** — including for envelopes the
+  receiver decides to ignore. An unacked envelope is simply redelivered, so
+  "ignore" must still mean "ack".
+- **Bot messages are dropped at the transport.** The sidekick's own posts come
+  back as message events; acting on them would make it answer itself forever.
+  Detected via `bot_id` or the `bot_message` subtype.
+- **Work runs on a detached context.** The envelope's context dies at ack, so
+  work hangs off `context.WithoutCancel(runCtx)` with its own 5 minute
+  timeout (`DefaultWorkTimeout`). Passing the envelope context through would
+  cancel every LLM call the instant it was acked — this is the single easiest
+  mistake to reintroduce here.
+- **Worker pool: 8 workers, queue 64** (`DefaultWorkers`,
+  `DefaultQueueSize`). A full queue **sheds load and logs at error level**
+  rather than growing without bound: a visible drop beats an invisible
+  backlog.
+- **Shutdown drains.** Accepted work has already been acked to Slack, so
+  abandoning it would silently lose a human's message. `Run` closes the job
+  channel and waits for workers before returning.
+- **A handler panic is contained** and logged with its stack; the receiver
+  keeps serving.
+- **Connection lifecycle events** (connecting, connected, disconnect,
+  invalid auth, errors) are logged, never dispatched, never acked.
+  Reconnection itself is `socketmode.Client`'s job.
+- **Dedup cache** is TTL-bounded (10 minutes) *and* capacity-bounded (4096),
+  evicting expired entries first and then the oldest. An empty id is treated
+  as new, because collapsing every unidentified delivery into one entry would
+  silently drop unrelated events.
+
+### Not in this phase
+
+No session lookup, no RCA, no replies. Phase 6 implements `Handler`; phase 5
+ships only a recording test double.
+
+---
+
+## 4d. Phase 6 — the coordinator (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/coordinator.go`, `rca.go`,
+`coordinator_test.go`, plus additions to `client.go` and `blocks.go`
+
+`Coordinator` implements the phase 5 `Handler`, so the receiver hands it work
+directly. It is where sessions, the poster and the analysis engine meet.
+
+```go
+coordinator, err := slack.NewCoordinator(client, sessions, rca,
+    slack.WithDefaultEnvironment(cfg.DefaultEnvironment),
+    slack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
+)
+
+// Alert-driven entry point: post, then open the session on the new thread.
+s, err := coordinator.Announce(ctx, diagnosis)
+
+// Handler (called by the receiver)
+coordinator.OnMessage(ctx, msg)
+coordinator.OnInteraction(ctx, interaction)
+coordinator.OnCommand(ctx, cmd)
+
+// Called by the phase 7 ticker
+coordinator.ReapIdle(ctx)
+```
+
+### The RCA seam — the integration point for the analysis branch
+
+`rca.go` declares the interface **on the consumer side**:
+
+```go
+type RCA interface {
+    Diagnose(ctx context.Context, req DiagnoseRequest) (notify.Diagnosis, error)
+    AnswerFollowup(ctx context.Context, req FollowupRequest) (string, error)
+}
+```
+
+`FollowupRequest` is a **flat value**, not a `*session.Session`, specifically so
+the analysis engine never has to import the session package. The coupling runs
+one way: the Slack adapter depends on a small interface, and the engine depends
+on nothing of ours. Attaching a real engine is a ~10-line adapter struct.
+
+Shipped with `UnavailableRCA`, which **refuses rather than improvises**. A
+fabricated root cause would be indistinguishable from a real one in the thread,
+so the stub returns `ErrRCAUnavailable` and the adapter says plainly that the
+engine is not connected — while noting the grounded facts still stand, because
+they came from the SLO engine, not a model.
+
+### Flows
+
+**Alert → thread.** `Announce` checks the fingerprint first. A live session for
+the same incident means a short "fired again" note in the *existing* thread and
+no second analysis (**E2**); otherwise it posts the diagnosis and opens the
+session keyed on the message it just created.
+
+**Button → decision.** `ByThread` → `Decide`/`Close` → rewrite the original
+message so the buttons are replaced by the outcome → reply in the thread. A
+second click gets "Already approved by @U1 at 14:32" (**E5**). A click with no
+session (restart) is answered, because the button proves the thread was ours.
+
+**Threaded message → answer.** Only threaded replies are considered; top-level
+channel messages belong to no incident. Then: turn lock → build the follow-up
+request → append the human turn → analysis → append the answer → reply.
+
+**`/diagnose <service> [env]`.** Acknowledge in channel, run the analysis under
+the concurrency cap, then `Announce`.
+
+### Decisions worth not re-litigating
+
+- **Buttons decide; text never does.** Typing "approve" triggers a nudge to the
+  button and records nothing. `isTerminalWord` matches only short, unqualified
+  phrases — "approve if you think the timeout theory holds" is a question, and
+  treating it as consent is the precise misread this design exists to avoid.
+  There is no intent classifier and no LLM in this path.
+- **The buttons are retired after a decision** via `chat.update` and
+  `ResolvedBlocks`. A live-looking Approve button on a decided incident is
+  actively misleading mid-incident. Update failure is logged, never
+  propagated: the decision is already in the session and the audit log.
+- **History excludes the current question.** `FollowupRequest.History` is the
+  conversation *so far*; the new turn travels in `Question`. Carrying it in
+  both would waste context and read as if it were asked twice.
+- **Unknown thread → one `conversations.replies` lookup.** The bot answers
+  only if it posted the thread root; otherwise it stays silent, and it stays
+  silent on lookup error too. Speaking wrongly in someone else's thread is
+  worse than saying nothing (**E3**).
+- **Closed sessions are answered once** per thread, tracked in the
+  coordinator's `notified` set (**E7**). Expired sessions say "expired", not
+  just "closed".
+- **Closing is not silencing.** Both the close reply and the expiry notice say
+  explicitly that ending the conversation does not stop a still-firing alert
+  (**E16**).
+- **The concurrency cap gates analysis only** (**E8**). Button clicks and
+  lookups are cheap and stay responsive when the system is saturated — a
+  decision must be possible even when busy. Saturation is stated plainly
+  ("too many analyses are running"), never silently queued.
+
+### Client additions
+
+`PostThreadReply`, `UpdateMessage`, `ThreadRootPostedByUs`, `Channel()`. The
+`poster` interface widened to three methods (`PostMessageContext`,
+`UpdateMessageContext`, `GetConversationRepliesContext`), all still satisfied
+by `*slack.Client` and by the test fake.
+
+### Testing note
+
+`slack.UnsafeApplyMsgOptions` exposes `text` and `thread_ts` but **not**
+`blocks` (see the phase 3 note). So coordinator tests assert on *which* message
+was updated, and `TestResolvedBlocks` asserts on *what* the rewrite contains.
+Log buffers in tests are wrapped in `syncBuffer`, because handler goroutines
+write to them while the test reads.
+
+---
+
+## 4e. Phase 7 — the `watch` subcommand (done)
+
+**Files:** `sre-sidekick/cmd/reliability-agent/watch.go`, `watch_test.go`, plus
+one case in `main.go`
+
+```bash
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_APP_TOKEN=xapp-...
+go run ./cmd/reliability-agent watch --config configs/sidekick.yaml
+```
+
+`--config` defaults to `configs/sidekick.yaml`, resolved relative to the
+working directory.
+
+### What it wires
+
+```
+config.Load  →  slackapi.New(bot, OptionAppLevelToken(app))
+             →  socketmode.New(api)
+             →  slack.New(cfg, WithPoster(api))
+             →  session.NewManager(WithTTL(cfg.SessionTTL))
+             →  slack.NewCoordinator(client, sessions, UnavailableRCA{})
+             →  slack.NewReceiver(socket.Events, socket, coordinator)
+             →  supervise(ctx, socket, receiver, coordinator)
+```
+
+`supervise` runs three things and stops all of them when any one finishes:
+the socket (`RunContext`), the receiver (`Run`), and a one-minute ticker
+calling `ReapIdle`. Shutdown order matters: the socket stops first so no new
+envelopes arrive, then the receiver drains work it has already acknowledged to
+Slack. Cancellation is a clean exit; a component failing is reported.
+
+The sweep interval is one minute against a 30 minute TTL, because the sweep is
+just a map scan over live sessions — running it often only bounds how late an
+expiry notice arrives.
+
+Each runner is behind a tiny interface (`socketRunner`, `receiverRunner`,
+`reaper`), so the supervisor's lifecycle is tested without dialling Slack.
+
+### Deliberately not included
+
+`watch` **does not serve HTTP**. The alert webhook that starts an alert-driven
+diagnosis belongs to the detection track; when it exists it calls
+`Coordinator.Announce` and nothing here changes. Building an HTTP server for
+someone else's route would mean deciding its auth and port before the route
+exists.
+
+`UnavailableRCA{}` is attached until the analysis branch lands — one line to
+swap. The binary is honest at runtime: `/diagnose` replies that the engine is
+not connected.
+
+### Startup behaviour worth relying on
+
+- Missing or **swapped** tokens fail at startup with the variable named and
+  the expected prefix stated, never the value:
+  `environment variable SLACK_BOT_TOKEN does not hold a Slack bot token:
+  expected a value starting with "xoxb-"`.
+- The startup log records channel, default environment, TTL, concurrency cap
+  and the credential **variable names**.
+- `SIGINT`/`SIGTERM` cancel the context via `signal.NotifyContext`.
+
+### One correctness fix to phase 5
+
+`*socketmode.Client.Ack` returns an `error`, which the phase 5 `acker`
+interface did not declare — so the real client never actually satisfied it.
+That only surfaced when this phase wired the two together. The interface now
+matches, and a failed ack is logged rather than propagated: Slack simply
+redelivers, and the dedup cache absorbs it.
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -421,12 +710,14 @@ belong to Track D.
 
 ## 6. Landmines for whoever works on this next
 
-- **Slack retries anything slower than 3 seconds** (**E11**). Every inbound
-  handler must ack `200` immediately and do LLM/MCP work asynchronously, and
-  must dedupe on the Slack `event_id` / retry header, or the same human turn
-  gets processed twice.
-- **Signature verification is non-negotiable** on all three inbound routes.
-  Without it anyone on the internet can puppet the bot.
+- **Slack redelivers anything not acked within 3 seconds** (**E11**). The
+  receiver acks first and works asynchronously, and dedupes on `event_id`.
+  Phase 6 handlers must not reintroduce slow work before the ack.
+- **Never pass the envelope's context into async work.** It is cancelled at
+  ack. Use the detached, timeout-bounded context the receiver supplies.
+- **Socket Mode means no signature verification exists.** That is correct, not
+  an oversight: there is no inbound endpoint to authenticate. If HTTP routes
+  are ever added back, signature verification becomes mandatory again.
 - **The same alert fires repeatedly** (**E2**). Dedupe by fingerprint
   (`service + env + slo + window`) and update the existing thread rather than
   opening a second session and paying for a second RCA run.
@@ -447,6 +738,7 @@ belong to Track D.
 
 ```bash
 cd sre-sidekick
+go run ./cmd/reliability-agent watch      # run the Slack adapter
 go build ./...
 go test ./... -count=1
 go test ./internal/notify/slack/ -count=1 -v
@@ -456,9 +748,14 @@ gofmt -l internal && go vet ./...
 Slack work needs these in the environment (values from the Slack app config):
 
 ```bash
-export SLACK_BOT_TOKEN=xoxb-...
-export SLACK_SIGNING_SECRET=...
+export SLACK_BOT_TOKEN=xoxb-...   # bot token, for posting
+export SLACK_APP_TOKEN=xapp-...   # app-level token, for the Socket Mode dial
 ```
+
+Slack app setup for Socket Mode: enable Socket Mode, create an app-level token
+with `connections:write`, subscribe to `message.channels` (and
+`message.groups` for private channels), enable interactivity, and register the
+`/diagnose` slash command. No Request URL is needed for any of them.
 
 ---
 
@@ -470,4 +767,7 @@ export SLACK_SIGNING_SECRET=...
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
 | — | 4 | `2d01cc7` | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
+| — | 7 | `092b045` | `watch` subcommand: dials Socket Mode, supervises the receiver and the idle sweep, drains on shutdown; fixes the `acker` signature so the real client satisfies it |
+| — | 6 | `ad414b6` | Coordinator: alert-to-thread announcements with dedup, button decisions with retired buttons, threaded follow-ups behind the RCA seam, `/diagnose`, idle expiry notices, analysis concurrency cap |
+| — | 5 | `9435ddc` | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
 | — | 3 | `a7daef5` | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
