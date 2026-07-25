@@ -92,6 +92,22 @@ func (r queryRangeResponse) scalar() (float64, error) {
 // SigNoz's ScalarData shape (aggregation columns plus data rows), not the
 // TimeSeriesData shape Scalar parses, so it needs its own extraction.
 func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, startMs, endMs uint64) (float64, error) {
+	value, _, err := c.ScalarBuilderWarning(ctx, query, startMs, endMs)
+	return value, err
+}
+
+// ScalarBuilderWarning is ScalarBuilder plus SigNoz's own top-level query
+// warning (PRD section 11.2: "preserve SigNoz query-completeness
+// metadata"), read from the v5 response's data.warning.message - the only
+// completeness-adjacent signal that field carries for a scalar builder
+// query. Confirmed against the actual response type
+// (querybuildertypesv5.QueryRangeResponse.Warning): SigNoz populates it
+// for step-interval clamping and metrics that have gone dormant, among
+// other query-shape adjustments; there is no per-row/per-series partial
+// flag on the scalar shape itself (unlike the time-series shape's
+// TimeSeriesValue.Partial, which the PromQL-based Scalar method already
+// reads) - so a per-value flag was never a gap that had a field to parse.
+func (c *Client) ScalarBuilderWarning(ctx context.Context, query source.MetricQuery, startMs, endMs uint64) (float64, string, error) {
 	timeAggregation := query.TimeAggregation
 	if timeAggregation == "" {
 		timeAggregation = "increase"
@@ -134,9 +150,17 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 	}
 	var response scalarBuilderResponse
 	if err := c.QueryRange(ctx, request, &response); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return response.scalar()
+	value, err := response.scalar()
+	if err != nil {
+		return 0, "", err
+	}
+	warning := ""
+	if response.Data.Warning != nil {
+		warning = response.Data.Warning.Message
+	}
+	return value, warning, nil
 }
 
 // scalarBuilderResponse parses SigNoz's ScalarData response shape:
@@ -167,6 +191,13 @@ func (c *Client) ScalarBuilder(ctx context.Context, query source.MetricQuery, st
 type scalarBuilderResponse struct {
 	Status string `json:"status"`
 	Data   struct {
+		// Warning is the v5 response's top-level completeness signal
+		// (querybuildertypesv5.QueryRangeResponse.Warning) - populated for
+		// step-interval clamping, dormant metrics, and similar query-shape
+		// adjustments SigNoz made on our behalf.
+		Warning *struct {
+			Message string `json:"message"`
+		} `json:"warning,omitempty"`
 		Data struct {
 			Results []struct {
 				Columns []struct {

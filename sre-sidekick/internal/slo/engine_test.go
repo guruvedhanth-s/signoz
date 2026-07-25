@@ -15,20 +15,33 @@ import (
 // cfg.Service/cfg.Environment, the metric name alone is enough to
 // distinguish "good" from "total" reads in these tests.
 type fakeMetrics struct {
-	Values map[string]float64
-	Errors map[string]error
+	Values   map[string]float64
+	Errors   map[string]error
+	Warnings map[string]string
 }
 
-func (f fakeMetrics) ScalarBuilder(_ context.Context, query source.MetricQuery, _, _ uint64) (float64, error) {
+func (f fakeMetrics) ScalarBuilder(ctx context.Context, query source.MetricQuery, start, end uint64) (float64, error) {
+	value, _, err := f.ScalarBuilderWarning(ctx, query, start, end)
+	return value, err
+}
+
+// ScalarBuilderWarning makes fakeMetrics satisfy source.WarningQuerier
+// unconditionally, so every existing test (which never sets Warnings)
+// exercises the same type-assertion path scalarWithWarning takes against
+// the real *signoz.Client - with an always-empty warning, identical to
+// before this method existed.
+func (f fakeMetrics) ScalarBuilderWarning(_ context.Context, query source.MetricQuery, _, _ uint64) (float64, string, error) {
 	if err := f.Errors[query.Metric]; err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	value, ok := f.Values[query.Metric]
 	if !ok {
-		return 0, errors.New("missing fake metric: " + query.Metric)
+		return 0, "", errors.New("missing fake metric: " + query.Metric)
 	}
-	return value, nil
+	return value, f.Warnings[query.Metric], nil
 }
+
+var _ source.WarningQuerier = fakeMetrics{}
 
 type fakeGate struct {
 	Result GateResult
@@ -180,5 +193,175 @@ func TestEngineOwnsCompletenessThresholdPolicy(t *testing.T) {
 	}
 	if reports[0].State != StateHealthy || !reports[0].Gate.Trusted {
 		t.Fatalf("threshold policy was not applied by engine: %+v", reports[0])
+	}
+}
+
+func completenessConfig(target float64) Config {
+	return Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
+		Name: "telemetry-coverage", Type: SLITypeCompleteness, Target: target, Window: "1h",
+		Dependencies: []string{"requests_total", "errors_total"},
+	}}}
+}
+
+// A completeness SLI's value is the gate's own coverage fraction, not a
+// good/total counter ratio - deriveMetricQueries is never called for it
+// (TestDeriveMetricQueries_CompletenessIsUnsupported in sli_test.go).
+func TestEvaluateCompleteness_Healthy(t *testing.T) {
+	engine := NewEngine(fakeMetrics{}, fakeGate{Result: GateResult{Coverage: 0.99, QueryComplete: true}})
+	reports, err := engine.Evaluate(context.Background(), completenessConfig(0.95), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].State != StateHealthy {
+		t.Fatalf("state = %q, want healthy: %+v", reports[0].State, reports[0])
+	}
+	if reports[0].SLI != 0.99 {
+		t.Errorf("SLI = %v, want the gate's coverage (0.99), not a counter ratio", reports[0].SLI)
+	}
+	if reports[0].Completeness != 0.99 {
+		t.Errorf("Completeness = %v, want 0.99", reports[0].Completeness)
+	}
+}
+
+func TestEvaluateCompleteness_BelowTargetIsUnhealthyNotIndeterminate(t *testing.T) {
+	engine := NewEngine(fakeMetrics{}, fakeGate{Result: GateResult{Coverage: 0.5, QueryComplete: true}})
+	reports, err := engine.Evaluate(context.Background(), completenessConfig(0.95), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The gate answered the question (QueryComplete) - a low coverage is a
+	// real, computed unhealthy state, not "we don't know".
+	if reports[0].State != StateUnhealthy {
+		t.Fatalf("state = %q, want unhealthy (the gate query succeeded, coverage was just low): %+v", reports[0].State, reports[0])
+	}
+	if reports[0].SLI != 0.5 {
+		t.Errorf("SLI = %v, want 0.5", reports[0].SLI)
+	}
+}
+
+func TestEvaluateCompleteness_IncompleteGateQueryIsIndeterminate(t *testing.T) {
+	engine := NewEngine(fakeMetrics{}, fakeGate{Result: GateResult{Coverage: 0.99, QueryComplete: false}})
+	reports, err := engine.Evaluate(context.Background(), completenessConfig(0.95), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].State != StateIndeterminate || reports[0].Error == "" {
+		t.Fatalf("expected an indeterminate report when the gate query itself did not complete: %+v", reports[0])
+	}
+}
+
+func TestEvaluateCompleteness_NoGateConfiguredIsIndeterminate(t *testing.T) {
+	engine := NewEngine(fakeMetrics{}, nil)
+	reports, err := engine.Evaluate(context.Background(), completenessConfig(0.95), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].State != StateIndeterminate || reports[0].Error == "" {
+		t.Fatalf("expected an indeterminate report with no gate configured: %+v", reports[0])
+	}
+}
+
+func TestEvaluateCompleteness_GateErrorIsIndeterminate(t *testing.T) {
+	gateErr := errors.New("dependency query failed")
+	engine := NewEngine(fakeMetrics{}, fakeErrGate{err: gateErr})
+	reports, err := engine.Evaluate(context.Background(), completenessConfig(0.95), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].State != StateIndeterminate || reports[0].Error != gateErr.Error() {
+		t.Fatalf("expected the gate error surfaced as indeterminate: %+v", reports[0])
+	}
+}
+
+type fakeErrGate struct{ err error }
+
+func (f fakeErrGate) Check(context.Context, GateRequest) (GateResult, error) {
+	return GateResult{}, f.err
+}
+
+// PRD section 11.2: "return the evaluated start and end timestamps".
+func TestEngineReportsTheEvaluatedWindow(t *testing.T) {
+	metrics := fakeMetrics{Values: map[string]float64{"good": 995, "total": 1000}}
+	engine := NewEngine(metrics, nil)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	engine.Now = func() time.Time { return now }
+	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
+		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total",
+	}}}
+
+	reports, err := engine.Evaluate(context.Background(), cfg, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reports[0].EvaluatedEnd.Equal(now) {
+		t.Errorf("EvaluatedEnd = %v, want %v", reports[0].EvaluatedEnd, now)
+	}
+	if want := now.Add(-time.Hour); !reports[0].EvaluatedStart.Equal(want) {
+		t.Errorf("EvaluatedStart = %v, want %v (window=1h before EvaluatedEnd)", reports[0].EvaluatedStart, want)
+	}
+}
+
+// An invalid window fails before any query runs. Config.Validate already
+// rejects this before Evaluate ever calls evaluate (so this path is not
+// reachable through the public API), but evaluate itself must still be
+// honest that no window was ever evaluated if it is ever called this way.
+func TestEngineReportsNoEvaluatedWindowOnAnInvalidWindow(t *testing.T) {
+	engine := NewEngine(fakeMetrics{}, nil)
+	cfg := Config{Service: "checkout-api", Environment: "test"}
+	definition := Definition{
+		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "not-a-duration",
+		GoodMetric: "good", TotalMetric: "total",
+	}
+	report := engine.evaluate(context.Background(), cfg, definition, time.Now())
+	if !report.EvaluatedStart.IsZero() || !report.EvaluatedEnd.IsZero() {
+		t.Errorf("EvaluatedStart/End = %v/%v, want zero when the window itself was invalid", report.EvaluatedStart, report.EvaluatedEnd)
+	}
+	if report.State != StateIndeterminate {
+		t.Errorf("State = %q, want indeterminate", report.State)
+	}
+}
+
+// PRD section 11.2: "preserve SigNoz query-completeness metadata" - a
+// warning from either the good or total query surfaces on the report.
+func TestEngineSurfacesASigNozWarningFromTheSLIQuery(t *testing.T) {
+	metrics := fakeMetrics{
+		Values:   map[string]float64{"good": 995, "total": 1000},
+		Warnings: map[string]string{"total": "metric total has gone dormant"},
+	}
+	engine := NewEngine(metrics, nil)
+	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
+		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total",
+	}}}
+	reports, err := engine.Evaluate(context.Background(), cfg, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].Warning != "metric total has gone dormant" {
+		t.Errorf("Warning = %q, want the SLI query's warning surfaced", reports[0].Warning)
+	}
+	// A warning is informational, not fatal - the SLO still computes.
+	if reports[0].State != StateHealthy {
+		t.Errorf("State = %q, want healthy - a warning must not force indeterminate", reports[0].State)
+	}
+}
+
+func TestEngineSurfacesASigNozWarningFromTheCompletenessGate(t *testing.T) {
+	engine := NewEngine(
+		fakeMetrics{Values: map[string]float64{"good": 995, "total": 1000}},
+		fakeGate{Result: GateResult{Coverage: 0.99, QueryComplete: true, Warning: "dependency requests_total has gone dormant"}},
+	)
+	cfg := Config{Service: "checkout-api", Environment: "test", SLOs: []Definition{{
+		Name: "success", Type: SLITypeRatio, Target: 0.99, Window: "1h",
+		GoodMetric: "good", TotalMetric: "total", RequiresCompleteness: true,
+		Dependencies: []string{"requests_total"},
+	}}}
+	reports, err := engine.Evaluate(context.Background(), cfg, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reports[0].Warning != "dependency requests_total has gone dormant" {
+		t.Errorf("Warning = %q, want the gate's warning surfaced", reports[0].Warning)
 	}
 }

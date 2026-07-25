@@ -529,7 +529,7 @@ func runGenerate(args []string) error {
 			if err != nil {
 				return err
 			}
-			status := "exists"
+			status := "updated"
 			if created {
 				status = "created"
 			}

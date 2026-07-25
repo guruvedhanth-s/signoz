@@ -78,6 +78,7 @@ func (g *MetricPresenceGate) Check(ctx context.Context, request GateRequest) (Ga
 	}
 	filter := scopeExpression(request.Service, request.Environment, serviceLabel, environmentLabel)
 	present := 0
+	var warnings []string
 	for _, metric := range metrics {
 		// A dependency is "present" when it has any samples at all in the
 		// window, regardless of value - so this counts raw samples
@@ -91,7 +92,7 @@ func (g *MetricPresenceGate) Check(ctx context.Context, request GateRequest) (Ga
 			TimeAggregation:  "count",
 			SpaceAggregation: "sum",
 		}
-		value, err := g.Metrics.ScalarBuilder(ctx, query, start, end)
+		value, warning, err := scalarWithWarning(ctx, g.Metrics, query, start, end)
 		if err != nil {
 			return GateResult{
 				Coverage:      float64(present) / float64(len(metrics)),
@@ -99,6 +100,9 @@ func (g *MetricPresenceGate) Check(ctx context.Context, request GateRequest) (Ga
 				Trusted:       false,
 				Reason:        fmt.Sprintf("dependency %s query failed: %v", metric, err),
 			}, nil
+		}
+		if warning != "" {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", metric, warning))
 		}
 		if value > 0 {
 			present++
@@ -109,5 +113,6 @@ func (g *MetricPresenceGate) Check(ctx context.Context, request GateRequest) (Ga
 		Coverage:      coverage,
 		QueryComplete: true,
 		Reason:        fmt.Sprintf("%d of %d dependencies have data", present, len(metrics)),
+		Warning:       strings.Join(warnings, "; "),
 	}, nil
 }

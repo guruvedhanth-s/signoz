@@ -55,3 +55,17 @@ type MetricQuery struct {
 type MetricQuerier interface {
 	ScalarBuilder(ctx context.Context, query MetricQuery, startMs, endMs uint64) (float64, error)
 }
+
+// WarningQuerier is optionally implemented by a MetricQuerier that can
+// also report SigNoz's own top-level query-completeness warning for the
+// same read - e.g. a metric that has gone dormant, or a clamped step
+// interval (PRD section 11.2: "preserve SigNoz query-completeness
+// metadata"). Checked via a type assertion (see slo.scalarWithWarning), so
+// a MetricQuerier that has no such information (an in-memory or test
+// double) is unaffected and behaves exactly as it does today.
+type WarningQuerier interface {
+	MetricQuerier
+	// ScalarBuilderWarning is ScalarBuilder plus SigNoz's warning message
+	// for the same call, empty if SigNoz raised none.
+	ScalarBuilderWarning(ctx context.Context, query MetricQuery, startMs, endMs uint64) (value float64, warning string, err error)
+}

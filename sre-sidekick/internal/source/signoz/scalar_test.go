@@ -217,22 +217,88 @@ func TestScalarBuilderErrorsOnNonSuccessStatus(t *testing.T) {
 // returns for a builder_query scalar request with reduceTo set.
 func writeScalarBuilderResponse(t *testing.T, w http.ResponseWriter, value float64) {
 	t.Helper()
+	writeScalarBuilderResponseWithWarning(t, w, value, "")
+}
+
+func writeScalarBuilderResponseWithWarning(t *testing.T, w http.ResponseWriter, value float64, warning string) {
+	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
-	body := map[string]any{
-		"status": "success",
+	data := map[string]any{
 		"data": map[string]any{
-			"data": map[string]any{
-				"results": []any{
-					map[string]any{
-						"queryName": "A",
-						"columns":   []any{map[string]any{"name": "__result_0", "columnType": "aggregation"}},
-						"data":      []any{[]any{value}},
-					},
+			"results": []any{
+				map[string]any{
+					"queryName": "A",
+					"columns":   []any{map[string]any{"name": "__result_0", "columnType": "aggregation"}},
+					"data":      []any{[]any{value}},
 				},
 			},
 		},
 	}
+	if warning != "" {
+		data["warning"] = map[string]any{"message": warning}
+	}
+	body := map[string]any{"status": "success", "data": data}
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestScalarBuilderWarning_ParsesTheTopLevelWarning locks in PRD section
+// 11.2 ("preserve SigNoz query-completeness metadata"): the v5 response's
+// top-level data.warning.message - the only completeness-adjacent field
+// SigNoz's ScalarData response shape actually carries (confirmed against
+// querybuildertypesv5.QueryRangeResponse.Warning; there is no per-row/
+// per-series partial flag on the scalar shape) - must round-trip through
+// unchanged.
+func TestScalarBuilderWarning_ParsesTheTopLevelWarning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeScalarBuilderResponseWithWarning(t, w, 42, "metric agent_requests_total has gone dormant")
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+	value, warning, err := client.ScalarBuilderWarning(context.Background(), source.MetricQuery{Metric: "agent_requests_total"}, 1000, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != 42 {
+		t.Errorf("value = %v, want 42", value)
+	}
+	if warning != "metric agent_requests_total has gone dormant" {
+		t.Errorf("warning = %q, want SigNoz's dormant-metric message", warning)
+	}
+}
+
+func TestScalarBuilderWarning_NoWarningIsEmptyString(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeScalarBuilderResponse(t, w, 42)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+	_, warning, err := client.ScalarBuilderWarning(context.Background(), source.MetricQuery{Metric: "x"}, 1000, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want empty when SigNoz raised none", warning)
+	}
+}
+
+// ScalarBuilder itself (the plain MetricQuerier method) must behave
+// identically to before this change - it just discards the warning.
+func TestScalarBuilder_StillWorksUnchangedWhenAWarningIsPresent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeScalarBuilderResponseWithWarning(t, w, 42, "some warning")
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "key")
+	value, err := client.ScalarBuilder(context.Background(), source.MetricQuery{Metric: "x"}, 1000, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != 42 {
+		t.Errorf("value = %v, want 42", value)
 	}
 }
