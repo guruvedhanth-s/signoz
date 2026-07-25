@@ -44,6 +44,8 @@ func main() {
 			err = runDiagnose(os.Args[2:])
 		case "watch":
 			err = runWatch(os.Args[2:])
+		case "preflight":
+			err = runPreflight(os.Args[2:])
 		default:
 			runServer(os.Args[1:])
 			return
