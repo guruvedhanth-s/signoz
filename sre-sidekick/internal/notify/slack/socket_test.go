@@ -3,6 +3,7 @@ package slack
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -39,12 +40,14 @@ func (b *syncBuffer) String() string {
 type recordingAcker struct {
 	mu    sync.Mutex
 	acked []string
+	err   error
 }
 
-func (a *recordingAcker) Ack(req socketmode.Request, _ ...any) {
+func (a *recordingAcker) Ack(req socketmode.Request, _ ...any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.acked = append(a.acked, req.EnvelopeID)
+	return a.err
 }
 
 func (a *recordingAcker) count() int {
@@ -505,6 +508,31 @@ func TestConnectionLifecycleEventsAreLoggedNotDispatched(t *testing.T) {
 	messages, interactions, commands := handler.counts()
 	if messages+interactions+commands != 0 {
 		t.Error("a lifecycle event reached the handler")
+	}
+}
+
+// A failed ack means Slack will redeliver, which is survivable; it must not
+// stop the work that was already decoded.
+func TestFailedAckIsLoggedAndWorkStillRuns(t *testing.T) {
+	handler := newRecordingHandler()
+	events := make(chan socketmode.Event, 4)
+	acker := &recordingAcker{err: errors.New("response too large")}
+	logs := &syncBuffer{}
+
+	receiver, err := NewReceiver(events, acker, handler,
+		WithReceiverLogger(slog.New(slog.NewTextHandler(logs, nil))))
+	if err != nil {
+		t.Fatalf("NewReceiver() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = receiver.Run(ctx) }()
+
+	events <- messageEvent("env-ack-fail", "Ev-ack-fail", "question")
+	handler.waitFor(t, 1)
+
+	if !strings.Contains(logs.String(), "could not acknowledge") {
+		t.Errorf("the failed ack was not logged\n%s", logs.String())
 	}
 }
 
