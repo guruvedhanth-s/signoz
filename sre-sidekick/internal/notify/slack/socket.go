@@ -52,8 +52,12 @@ type Handler interface {
 // acker acknowledges an envelope. *socketmode.Client satisfies it; tests use a
 // recorder. Keeping it an interface is what lets the whole receiver be tested
 // without a WebSocket.
+//
+// Ack returns an error because Slack silently drops oversized Socket Mode
+// responses; a failed ack means the envelope will be redelivered, which the
+// dedup cache then absorbs.
 type acker interface {
-	Ack(req socketmode.Request, payload ...any)
+	Ack(req socketmode.Request, payload ...any) error
 }
 
 // Receiver consumes the Socket Mode event stream, acks each envelope, drops
@@ -249,11 +253,11 @@ func (r *Receiver) handle(event socketmode.Event, jobs chan<- job) {
 	if !ok {
 		// Still ack: an envelope we choose not to act on is handled, and
 		// leaving it unacked only invites Slack to send it again.
-		r.ack.Ack(*event.Request)
+		r.acknowledge(*event.Request, string(event.Type))
 		return
 	}
 
-	r.ack.Ack(*event.Request)
+	r.acknowledge(*event.Request, scheduled.kind)
 
 	if event.Request.RetryAttempt > 0 {
 		r.logger.Warn("slack redelivered an envelope",
@@ -276,6 +280,16 @@ func (r *Receiver) handle(event socketmode.Event, jobs chan<- job) {
 		r.logger.Error("slack work queue full, dropped an event",
 			"kind", scheduled.kind, "id", scheduled.id, "queue_size", r.queueSize,
 		)
+	}
+}
+
+// acknowledge tells Slack the envelope was received. A failed ack is logged
+// rather than propagated: the envelope will simply be redelivered, and the
+// dedup cache stops that turning into duplicated work.
+func (r *Receiver) acknowledge(request socketmode.Request, kind string) {
+	if err := r.ack.Ack(request); err != nil {
+		r.logger.Warn("could not acknowledge a slack envelope",
+			"kind", kind, "envelope_id", request.EnvelopeID, "error", err.Error())
 	}
 }
 
