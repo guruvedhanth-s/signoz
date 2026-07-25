@@ -14,6 +14,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
+	"go.opentelemetry.io/otel"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
 	sidekickslack "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify/slack"
@@ -57,10 +58,18 @@ func runWatch(args []string) error {
 }
 
 func watchWithConfig(cfg config.SlackConfig) error {
+	// Metrics are optional: when no meter provider is configured the global one
+	// is a no-op, so the adapter runs identically without a collector.
+	metrics, err := sidekickslack.NewMetrics(otel.Meter("sre-sidekick"))
+	if err != nil {
+		return err
+	}
+
 	botToken, err := cfg.BotToken()
 	if err != nil {
 		return err
 	}
+
 	appToken, err := cfg.AppToken()
 	if err != nil {
 		return err
@@ -69,7 +78,10 @@ func watchWithConfig(cfg config.SlackConfig) error {
 	api := slackapi.New(botToken, slackapi.OptionAppLevelToken(appToken))
 	socket := socketmode.New(api)
 
-	client, err := sidekickslack.New(cfg, sidekickslack.WithPoster(api))
+	client, err := sidekickslack.New(cfg,
+		sidekickslack.WithPoster(api),
+		sidekickslack.WithMetrics(metrics),
+	)
 	if err != nil {
 		return err
 	}
@@ -87,6 +99,7 @@ func watchWithConfig(cfg config.SlackConfig) error {
 		client, sessions, sidekickslack.UnavailableRCA{},
 		sidekickslack.WithDefaultEnvironment(cfg.DefaultEnvironment),
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
+		sidekickslack.WithCoordinatorMetrics(metrics),
 	)
 	if err != nil {
 		return err

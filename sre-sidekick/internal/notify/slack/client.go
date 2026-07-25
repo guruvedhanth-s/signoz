@@ -31,6 +31,7 @@ type Client struct {
 	channel string
 	logger  *slog.Logger
 	retry   RetryPolicy
+	metrics *Metrics
 
 	// sleep and now are injectable so retry timing is testable without real
 	// delays.
@@ -110,6 +111,12 @@ func WithLogger(logger *slog.Logger) Option {
 			c.logger = logger
 		}
 	}
+}
+
+// WithMetrics reports delivery failures to OpenTelemetry, so a Slack outage is
+// visible on a dashboard and not only in the logs.
+func WithMetrics(metrics *Metrics) Option {
+	return func(c *Client) { c.metrics = metrics }
 }
 
 // WithRetryPolicy overrides the default retry bounds.
@@ -429,6 +436,7 @@ func (c *Client) fail(msg message, attempts int, err error) error {
 	if strings.TrimSpace(channel) == "" {
 		channel = c.channel
 	}
+	c.metrics.NotifyFailed(context.Background(), failureKind(msg))
 	c.logger.Error("slack message not delivered",
 		"correlation_id", msg.correlationID,
 		"kind", msg.kind,
@@ -438,6 +446,18 @@ func (c *Client) fail(msg message, attempts int, err error) error {
 		"error", err.Error(),
 	)
 	return fmt.Errorf("slack: post %s for %q: %w", msg.kind, msg.service, err)
+}
+
+// failureKind classifies an undelivered message for the failure metric.
+func failureKind(msg message) string {
+	switch {
+	case msg.isUpdate:
+		return FailureUpdate
+	case msg.threadTS != "":
+		return FailureReply
+	default:
+		return FailurePost
+	}
 }
 
 // backoff returns how long to wait before the next attempt. When Slack states

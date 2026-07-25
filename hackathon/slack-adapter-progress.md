@@ -60,7 +60,7 @@ Two shapes are being built, in order:
 | 5 | Inbound door: Socket Mode receiver | **done** | `feat/slack-inbound` |
 | 6 | Handlers: coordinator, decisions, follow-ups | **done** | `feat/slack-handlers` |
 | 7 | `watch` subcommand: dial Slack and supervise | **done** | `feat/slack-watch` |
-| 8 | Integration tests + `sidekick_incidents` metrics | not started | — |
+| 8 | Integration tests + metrics | **done** | `feat/slack-metrics` |
 
 Branches stack: each phase branches from the previous phase's branch, since
 none are merged to `main` yet.
@@ -674,6 +674,74 @@ redelivers, and the dedup cache absorbs it.
 
 ---
 
+## 4f. Phase 8 — metrics and end-to-end tests (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/metrics.go`, `metrics_test.go`,
+`metrics_reader_test.go`, `sre-sidekick/integration/slack_flow_test.go`
+
+### Metrics
+
+| Metric | Type | Attributes | Emitted when |
+|---|---|---|---|
+| `sidekick_incidents` | counter | `service`, `status` | an incident thread is opened (PRD section 17) |
+| `sidekick_decisions` | counter | `service`, `decision` | approved, declined, closed or expired |
+| `sidekick_sessions_active` | up/down counter | — | open and close; a value that only climbs is a session leak |
+| `sidekick_notify_failures` | counter | `kind` (post/reply/update) | a message could not be delivered |
+| `sidekick_followups` | counter | `service`, `outcome` | a follow-up turn finishes |
+
+All five carry the `sidekick_` prefix. The PRD fixes that prefix for
+`sidekick_incidents`, and metric names are effectively a public API —
+dashboards and alerts hardcode them, so one prefixed name among four
+unprefixed ones would look accidental and be expensive to correct later. The
+older unprefixed names elsewhere in the repo (`slo_burn_rate`,
+`telemetry_quality_score`) are left alone.
+
+`sidekick_notify_failures` is the counterpart to the phase 3 decision to
+*return* delivery errors: it makes a Slack outage visible on a dashboard
+rather than only in logs.
+
+**Plumbing:** injected via `WithMetrics` (client) and `WithCoordinatorMetrics`
+(coordinator). Every `*Metrics` method is **nil-safe**, so metrics are
+genuinely optional and no constructor or test needs a meter. `watch` passes
+`otel.Meter("sre-sidekick")`, which is a no-op when no provider is configured.
+
+Tests use `sdkmetric.NewManualReader`, so assertions read the values actually
+recorded rather than trusting that a call was made.
+
+### The end-to-end tests
+
+`integration/slack_flow_test.go` wires **every real component** — receiver,
+coordinator, session store, and a real `slack-go` client — against a stand-in
+Slack Web API on `httptest` plus a channel for the socket stream. No network,
+no workspace, runs in seconds.
+
+Why this exists, concretely: unit tests check each piece against a fake of its
+neighbour, so they cannot catch a seam that is wrong on *both* sides. That is
+not hypothetical here — the phase 5 `acker` interface omitted the error that
+`socketmode.Client.Ack` returns, so the real client never satisfied it, and
+every unit test still passed because the fake matched the wrong interface.
+
+Scenarios, following the PRD section 23 demo script:
+
+1. healthy run → nothing is posted
+2. indeterminate → no cause, no fix, no approve button, missing evidence listed
+3. **diagnose → approve** → session keyed on the returned message ts, buttons
+   retired by a real `chat.update`, confirmation says nothing was executed
+4. re-fired alert → one thread, one session, frozen diagnosis untouched
+5. follow-up Q&A → pinned grounding in the request, history accumulates,
+   participants recorded
+6. typed "approve" → nudge, no decision recorded
+7. restart → lost-session notice in our thread, silence in a thread we did not
+   start
+8. idle expiry → notice in-thread, with the "does not silence the alert" caveat
+9. two incidents → fully independent
+10. second decision → refused, first stands
+11. post failure → reported, and no session left behind
+12. own message echo → ignored
+13. redelivered envelope → answered once
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -767,6 +835,7 @@ with `connections:write`, subscribe to `message.channels` (and
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
 | — | 2 | `53bfbb0` | This progress and handover document |
 | — | 4 | `2d01cc7` | Session store: thread-keyed sessions, fingerprint dedup, single-writer decisions, budgeted follow-up evidence, TTL reaper |
+| — | 8 | pending | Metrics for incidents, decisions, sessions, follow-ups and delivery failures; end-to-end tests wiring every real component against a stand-in Slack API |
 | — | 7 | `092b045` | `watch` subcommand: dials Socket Mode, supervises the receiver and the idle sweep, drains on shutdown; fixes the `acker` signature so the real client satisfies it |
 | — | 6 | `ad414b6` | Coordinator: alert-to-thread announcements with dedup, button decisions with retired buttons, threaded follow-ups behind the RCA seam, `/diagnose`, idle expiry notices, analysis concurrency cap |
 | — | 5 | `9435ddc` | Socket Mode receiver: ack-then-dispatch, dedup, bounded worker pool, draining shutdown; config gains `app_token_env` and drops `signing_secret_env` |
