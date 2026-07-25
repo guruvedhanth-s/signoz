@@ -1,0 +1,33 @@
+# Reproducible stock SigNoz + MCP for the SRE Sidekick hackathon demo (PRD
+# section 19). Reproduce with:
+#
+#   export SIGNOZ_ADMIN_EMAIL=admin@example.com
+#   export SIGNOZ_ADMIN_PASSWORD='ChangeMe123!'
+#   foundryctl cast -f casting.yaml
+#
+# SIGNOZ_ADMIN_EMAIL/SIGNOZ_ADMIN_PASSWORD are read from the shell by Docker
+# Compose (see `${...}` below, and casting.yaml.lock's rendered compose
+# env) - they are never written into either committed file. The root user
+# they create is what sre-sidekick/scripts/bootstrap.sh logs in as to
+# provision the service account, API key, and webhook channel the sidekick
+# needs (PRD section 19). Nothing here is a custom image or a modified
+# SigNoz deployment: this is `mcp.spec.enabled: true` on the stock
+# `docker/compose` casting, the only change from foundryctl's own example.
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: signoz
+spec:
+  deployment:
+    flavor: compose
+    mode: docker
+  mcp:
+    spec:
+      enabled: true
+  signoz:
+    spec:
+      env:
+        SIGNOZ_USER_ROOT_ENABLED: "true"
+        SIGNOZ_USER_ROOT_EMAIL: "${SIGNOZ_ADMIN_EMAIL}"
+        SIGNOZ_USER_ROOT_PASSWORD: "${SIGNOZ_ADMIN_PASSWORD}"
+        SIGNOZ_USER_ROOT_ORG_NAME: "sre-sidekick-demo"
