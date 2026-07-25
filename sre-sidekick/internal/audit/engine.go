@@ -9,9 +9,15 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/profile"
 )
 
+// deepLinkWindow is the cosmetic time range shown in a finding's SigNoz
+// deep link. It is independent of whatever window the caller actually
+// queried the snapshot over - the deep link exists so a human can open the
+// explorer and look around, not to reproduce the exact query.
+const deepLinkWindow = 15 * time.Minute
+
 type Engine struct{}
 
-func (Engine) Run(p profile.Profile, snapshot evidence.Snapshot, now time.Time) (Report, error) {
+func (e Engine) Run(p profile.Profile, snapshot evidence.Snapshot, now time.Time) (Report, error) {
 	if err := p.Validate(); err != nil {
 		return Report{}, err
 	}
@@ -26,6 +32,7 @@ func (Engine) Run(p profile.Profile, snapshot evidence.Snapshot, now time.Time) 
 	}
 	for _, rule := range p.Spec.AuditRules {
 		finding := evaluate(rule, snapshot, now)
+		e.attachDeepLink(&finding, rule, p, now)
 		report.Findings = append(report.Findings, finding)
 		if finding.Status == Fail {
 			report.Counts[finding.Severity]++
@@ -50,6 +57,31 @@ func (Engine) Run(p profile.Profile, snapshot evidence.Snapshot, now time.Time) 
 	report.Score = score(report.Findings)
 	report.OverallStatus = overallStatus(report.Findings, snapshot.Complete())
 	return report, nil
+}
+
+// attachDeepLink populates f.Evidence with a SigNoz explorer link scoped to
+// the rule's own signal and the profile's service/environment, so a
+// finding can be clicked through to instead of only read as text (PRD
+// section 8). Skipped when the rule has no signal (nothing to scope an
+// explorer view to) or the profile names no reachable SigNoz endpoint.
+func (Engine) attachDeepLink(f *Finding, rule profile.RuleSpec, p profile.Profile, now time.Time) {
+	if rule.Signal == "" || p.Spec.Source.Endpoint == "" {
+		return
+	}
+	link := BuildDeepLink(
+		p.Spec.Source.Endpoint,
+		rule.Signal,
+		ScopeFilter(p.Metadata.Service, p.Metadata.Environment),
+		now.Add(-deepLinkWindow),
+		now,
+	)
+	if link == "" {
+		return
+	}
+	if f.Evidence == nil {
+		f.Evidence = map[string]any{}
+	}
+	f.Evidence["signoz_link"] = link
 }
 
 func evaluate(rule profile.RuleSpec, snapshot evidence.Snapshot, now time.Time) Finding {

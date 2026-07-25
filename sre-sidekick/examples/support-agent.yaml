@@ -36,8 +36,17 @@ spec:
               type: boolean
               required: true
 
+  # The five checks named by PRD section 8 (Track A), plus one AI-agent-
+  # specific check this profile already carried (groundedness-verdict).
   audit_rules:
-    - id: model-name
+    - id: missing_service_name
+      type: required_field
+      signal: traces
+      field: service.name
+      severity: blocker
+      recommendation: Set service.name in the OpenTelemetry resource.
+
+    - id: missing_model_name
       type: required_field
       signal: traces
       applies_to: model.chat
@@ -45,13 +54,36 @@ spec:
       severity: warning
       recommendation: Record the requested model on every model span.
 
-    - id: model-token-usage
+    - id: missing_token_usage
       type: required_field
       signal: traces
       applies_to: model.chat
       field: gen_ai.usage.input_tokens
       severity: warning
       recommendation: Record input token usage on every model span.
+
+    - id: high_cardinality_attribute
+      type: cardinality
+      signal: traces
+      field: gen_ai.request.model
+      max_distinct_values: 20
+      severity: warning
+      recommendation: >-
+        Model names should stay within a small, bounded set; an unbounded
+        value here usually means a per-request identifier (a session id, a
+        user id) was attached to this field instead.
+
+    - id: stale_service
+      type: freshness
+      signal: traces
+      field: timestamp
+      max_age: 5m
+      severity: blocker
+      recommendation: >-
+        This service has not emitted any traces recently - confirm it is
+        still running and instrumented. "timestamp" is set on every
+        record regardless of its other fields, so this checks for any
+        recent activity from the service at all, not one specific field.
 
     - id: groundedness-verdict
       type: required_field
