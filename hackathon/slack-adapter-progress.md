@@ -55,7 +55,7 @@ Two shapes are being built, in order:
 | 0 | `Notifier` interface + `Diagnosis` types + fake | done before this work | — |
 | 1 | Typed `sidekick.yaml` config loader | **done** | `feat/slack-config` |
 | 2 | Block Kit rendering (pure functions) | **done** | `feat/slack-blocks` |
-| 3 | Slack client + `notify.Notifier` implementation | not started | `feat/slack-client` |
+| 3 | Slack client + `notify.Notifier` implementation | **done** | `feat/slack-client` |
 | 4 | Session store (`internal/session`) | not started | — |
 | 5 | Inbound HTTP (signature verify, 3s ack, dedup) | not started | — |
 | 6 | Handlers (interactivity, events, `/diagnose`) | not started | — |
@@ -184,6 +184,109 @@ tests care about.
 
 ---
 
+## 4a. Phase 3 — Slack client and Notifier implementation (done)
+
+**Files:** `sre-sidekick/internal/notify/slack/client.go`, `client_test.go`
+
+```go
+client, err := slack.New(cfg.Notify.Slack, slack.WithLogger(logger))
+err = client.NotifyDiagnosis(ctx, d)      // notify.Notifier
+ref, err := client.PostDiagnosis(ctx, d)  // same, plus the posted message ref
+```
+
+`*Client` satisfies `notify.Notifier`, asserted at compile time.
+
+### The transport seam
+
+```go
+type poster interface {
+    PostMessageContext(ctx context.Context, channelID string, options ...slack.MsgOption) (string, string, error)
+}
+```
+
+`*slack.Client` satisfies this, and so does a test fake. Injected with
+`WithPoster`. This is the seam that keeps the whole adapter testable without a
+workspace, and it is also how the session layer will get the returned message
+timestamp.
+
+### `PostRef` — why it exists before it is used
+
+`PostDiagnosis`/`PostIndeterminate` return `PostRef{Channel, Timestamp}`.
+The `Timestamp` is the Slack message `ts` of the root message, which becomes
+the `thread_ts` session key in phase 4. Nothing consumes it yet; it is returned
+now so the session layer does not have to reshape this API later.
+
+### Retry policy
+
+`DefaultRetryPolicy()`: 4 attempts, backoff 250ms doubling to a 2s cap, ±20%
+jitter, 10s total wall-clock budget, `ctx` honoured throughout.
+
+- **Why retry:** Slack rate limits and 5xx blips are routine, and a diagnosis
+  that silently never arrives is the worst failure this adapter has.
+- **Why bound it:** an unbounded retry is itself an outage. When Slack's
+  `Retry-After` exceeds the remaining budget (it sometimes says 60s) the client
+  gives up and reports, rather than stalling the diagnose loop.
+- **Why jitter:** during an alert storm, retries that fire in lockstep re-spike
+  the API they are waiting on.
+- **Retryable:** `RateLimitedError` (honouring its exact `Retry-After`), HTTP
+  429/5xx, and unclassified errors (assumed network).
+- **Not retryable:** context cancellation, and the permanent Slack errors
+  listed in `permanentSlackErrors` (`invalid_auth`, `channel_not_found`,
+  `not_in_channel`, `msg_too_long`, `invalid_blocks`, ...). Retrying those only
+  wastes the budget and delays the failure report.
+
+### Failure semantics (decided deliberately)
+
+A failed post is **logged at `Error` with the correlation id, then returned**.
+
+- Returning it keeps the `Notifier` interface honest: an undelivered diagnosis
+  is a real event. Swallowing it would mean nobody is told, and nobody knows
+  nobody was told.
+- The log record exists so the failure is in the audit trail regardless of what
+  the caller does with the error (PRD section 20).
+- **The rule that a Slack outage must not take down the engine (E17, PRD
+  section 25) is enforced at the call site**, in phase 7: the loop treats a
+  notify error as non-fatal, logs it, marks the incident undelivered and
+  continues. Do not "fix" this by making the client return `nil`.
+- A panic in rendering or transport is recovered, logged with its stack, and
+  converted to an error - a malformed diagnosis must not crash the process
+  that is trying to report an incident.
+
+### Fallback text
+
+Every message carries plain-text fallback (`diagnosisFallback` /
+`indeterminateFallback`). Block Kit messages without it arrive blank in push
+notifications and for screen readers. The fallback carries deterministic facts
+only - service, SLO, state, burn rate, error budget.
+
+### Logging
+
+`log/slog`, matching the rest of the sidekick, injectable via `WithLogger`
+(defaults to `slog.Default()`). One record per outcome: `slack message posted`
+(info), `slack post failed, retrying` (warn), `slack message not delivered`
+(error), `slack adapter panicked` (error). All carry `correlation_id`.
+
+### Testing approach - read this before adding tests
+
+Two different fakes, on purpose:
+
+1. **`fakePoster`** - implements `poster`, scripts a sequence of results. Used
+   for retry, backoff, cancellation and failure-logging tests. Combined with an
+   injected clock (`withClock`, `withoutJitter`), so "waited 2s" is asserted in
+   microseconds and the suite has no real sleeps.
+2. **`wireRecorder`** - an `httptest` server plus a *real* `*slack.Client`
+   pointed at it. Used for payload assertions. This is necessary because
+   `MsgOption`s only become a payload inside the Slack library's request
+   builder: `slack.UnsafeApplyMsgOptions` does **not** expose blocks, since
+   `MsgOptionBlocks` writes to an unexported `sendConfig.blocks` field that is
+   only serialised in `formSender.BuildRequestContext`. Asserting on the real
+   form body avoids testing a reimplementation of the library.
+
+Note: `go test -race` does not run on a Windows box without a C toolchain
+(`cgo.exe: exit status 2`). Run the race detector in CI or on Linux.
+
+---
+
 ## 5. Design decisions that shape everything after this
 
 These were settled in discussion and should not be silently reopened.
@@ -265,3 +368,5 @@ export SLACK_SIGNING_SECRET=...
 |---|---|---|---|
 | — | 1 | `c084916` | Typed `sidekick.yaml` loader; env-var-named secrets, strict presence validation, unknown keys rejected |
 | — | 2 | `4909ef8` | Block Kit rendering for diagnosis and indeterminate messages; approve/decline/close buttons; escaping, link allowlist, evidence cap |
+| — | 2 | `53bfbb0` | This progress and handover document |
+| — | 3 | pending | Slack client implementing `notify.Notifier`; bounded retry with jitter and rate-limit awareness, fallback text, correlation-id audit logging, panic containment |
