@@ -52,9 +52,10 @@ type Agent struct {
 	// error samples and how much concentration/latency shift/error-rate
 	// delta/saturation it takes to move from CouldNotDetermine to
 	// RankedHypotheses to Conclusion. The zero value is not used directly -
-	// Decide and Present always apply withDefaults() - so leaving this unset
-	// is equivalent to DefaultPresentationConfig(). Callers that load
-	// sidekick.yaml (LoadPresentationConfig) should set this explicitly.
+	// Decide and Present always apply WithDefaults() - so leaving this
+	// unset is equivalent to DefaultPresentationConfig(). Callers that load
+	// sidekick.yaml (internal/config's presentation: section) should set
+	// this explicitly, converting from config.PresentationConfig.
 	Presentation PresentationConfig
 }
 

@@ -20,6 +20,7 @@ func setCredentials(t *testing.T) {
 	t.Helper()
 	t.Setenv(DefaultBotTokenEnv, "xoxb-test-token")
 	t.Setenv(DefaultAppTokenEnv, "xapp-test-token")
+	t.Setenv(DefaultLLMAPIKeyEnv, "test-openrouter-key")
 }
 
 func TestParseAppliesDefaults(t *testing.T) {
@@ -52,6 +53,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 func TestParseFullConfig(t *testing.T) {
 	t.Setenv("CUSTOM_TOKEN", "xoxb-custom")
 	t.Setenv("CUSTOM_APP_TOKEN", "xapp-custom")
+	t.Setenv(DefaultLLMAPIKeyEnv, "test-openrouter-key")
 
 	yaml := `
 notify:
@@ -309,4 +311,118 @@ func sprint(cfg Config) string {
 	b.WriteString(cfg.Notify.Slack.DefaultChannel)
 	b.WriteString(cfg.Notify.Slack.SessionTTL)
 	return b.String()
+}
+
+// diagnose (via LoadForRCA) never touches Slack, so it must not need
+// SLACK_BOT_TOKEN/SLACK_APP_TOKEN just to read the LLM and presentation
+// settings out of the same sidekick.yaml watch uses.
+func TestParseForRCA_DoesNotRequireSlackCredentials(t *testing.T) {
+	t.Setenv(DefaultLLMAPIKeyEnv, "test-openrouter-key")
+
+	cfg, err := ParseForRCA([]byte(minimalYAML))
+	if err != nil {
+		t.Fatalf("ParseForRCA() error = %v", err)
+	}
+	if cfg.LLM.Model != DefaultLLMModel {
+		t.Errorf("LLM.Model = %q, want the default", cfg.LLM.Model)
+	}
+}
+
+// ParseForRCA still requires the LLM API key: every RCA entry point needs
+// the reasoner, unlike Slack which only `watch` uses.
+func TestParseForRCA_StillRequiresTheLLMAPIKey(t *testing.T) {
+	t.Setenv(DefaultLLMAPIKeyEnv, "")
+	if _, err := ParseForRCA([]byte(minimalYAML)); err == nil {
+		t.Fatal("ParseForRCA() error = nil, want the missing LLM API key reported")
+	}
+}
+
+func TestParse_LLMDefaults(t *testing.T) {
+	setCredentials(t)
+
+	cfg, err := Parse([]byte(minimalYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.LLM.Provider != DefaultLLMProvider {
+		t.Errorf("LLM.Provider = %q, want %q", cfg.LLM.Provider, DefaultLLMProvider)
+	}
+	if cfg.LLM.Model != DefaultLLMModel {
+		t.Errorf("LLM.Model = %q, want %q", cfg.LLM.Model, DefaultLLMModel)
+	}
+	if cfg.LLM.APIKeyEnv != DefaultLLMAPIKeyEnv {
+		t.Errorf("LLM.APIKeyEnv = %q, want %q", cfg.LLM.APIKeyEnv, DefaultLLMAPIKeyEnv)
+	}
+	if key, err := cfg.LLM.APIKey(); err != nil || key != "test-openrouter-key" {
+		t.Errorf("LLM.APIKey() = (%q, %v), want the value from the default env var", key, err)
+	}
+}
+
+func TestParse_LLMOverrides(t *testing.T) {
+	t.Setenv("CUSTOM_LLM_KEY", "custom-key")
+	setCredentials(t)
+
+	yaml := minimalYAML + `
+llm:
+  provider: openrouter
+  model: some/other-model
+  api_key_env: CUSTOM_LLM_KEY
+  base_url: https://example.test/v1/chat/completions
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.LLM.Model != "some/other-model" {
+		t.Errorf("LLM.Model = %q", cfg.LLM.Model)
+	}
+	if cfg.LLM.BaseURL != "https://example.test/v1/chat/completions" {
+		t.Errorf("LLM.BaseURL = %q", cfg.LLM.BaseURL)
+	}
+	key, err := cfg.LLM.APIKey()
+	if err != nil || key != "custom-key" {
+		t.Errorf("LLM.APIKey() = (%q, %v), want the overridden env var's value", key, err)
+	}
+}
+
+// A Config value must never hold the LLM API key itself, the same
+// guarantee TestConfigNeverHoldsSecretValues gives the Slack tokens.
+func TestConfigNeverHoldsLLMAPIKeyValue(t *testing.T) {
+	setCredentials(t)
+	t.Setenv(DefaultLLMAPIKeyEnv, "sk-super-secret-openrouter-key")
+
+	cfg, err := Parse([]byte(minimalYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.LLM.APIKeyEnv == "sk-super-secret-openrouter-key" {
+		t.Error("Config.LLM holds the secret value instead of the env var name")
+	}
+}
+
+func TestParse_PresentationOverride(t *testing.T) {
+	setCredentials(t)
+
+	yaml := minimalYAML + `
+presentation:
+  min_error_samples: 10
+  concentration_threshold: 0.75
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Presentation.MinErrorSamples != 10 {
+		t.Errorf("Presentation.MinErrorSamples = %d, want 10", cfg.Presentation.MinErrorSamples)
+	}
+	if cfg.Presentation.ConcentrationThreshold != 0.75 {
+		t.Errorf("Presentation.ConcentrationThreshold = %v, want 0.75", cfg.Presentation.ConcentrationThreshold)
+	}
+	// A field left out of the file is zero here (this package applies no
+	// presentation defaults of its own - see applyDefaults); rca.Decide and
+	// rca.Present fill it in via PresentationConfig.WithDefaults() when the
+	// converted value is actually used.
+	if cfg.Presentation.LatencyShiftThreshold != 0 {
+		t.Errorf("Presentation.LatencyShiftThreshold = %v, want the zero value (rca defaults it on use)", cfg.Presentation.LatencyShiftThreshold)
+	}
 }

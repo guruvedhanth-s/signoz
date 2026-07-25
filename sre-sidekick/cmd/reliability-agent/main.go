@@ -18,6 +18,7 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/alerting"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/api"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/audit"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mcp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/monitor"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
@@ -150,7 +151,7 @@ func runDiagnose(args []string) error {
 	mcpURL := fs.String("mcp-url", os.Getenv("SIGNOZ_MCP_URL"), "SigNoz MCP server URL; when set, evidence is gathered live via MCP tools instead of the M1 telemetry-source placeholder")
 	signozInternalURL := fs.String("signoz-internal-url", os.Getenv("SIGNOZ_INTERNAL_URL"), "SigNoz URL the MCP server should use to reach SigNoz (sent as the X-SigNoz-URL header); required when --mcp-url is set")
 	sloConfigPath := fs.String("slo-config", "examples/support-agent-slo.yaml", "SLO YAML path used to ground this diagnosis's grounding facts (SLO state, burn rate, error budget, telemetry trust)")
-	presentationConfigPath := fs.String("config", envOr("SIDEKICK_CONFIG", "sidekick.yaml"), "presentation rule config YAML path (PRD 13.4: min error samples, concentration/latency-shift/error-rate-delta thresholds, golden signals required for a conclusion); a missing file falls back to built-in defaults")
+	sidekickConfigPath := fs.String("sidekick-config", envOr("SIDEKICK_CONFIG", DefaultConfigPath), "path to sidekick.yaml (PRD section 18): LLM provider settings and the section 13.4 presentation-rule thresholds. diagnose never touches the notify.slack section, so it does not require Slack credentials to be set")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
@@ -164,15 +165,21 @@ func runDiagnose(args []string) error {
 		return fmt.Errorf("--signoz-internal-url (or SIGNOZ_INTERNAL_URL) is required when --mcp-url is set")
 	}
 
+	sidekickCfg, err := config.LoadForRCA(*sidekickConfigPath)
+	if err != nil {
+		return err
+	}
+
 	ctx := context.Background()
 
 	agent, client, err := buildRCAAgent(ctx, rcaConfig{
-		SignozURL:              *signozURL,
-		APIKey:                 *apiKey,
-		Limit:                  *limit,
-		MCPURL:                 *mcpURL,
-		SignozInternalURL:      *signozInternalURL,
-		PresentationConfigPath: *presentationConfigPath,
+		SignozURL:         *signozURL,
+		APIKey:            *apiKey,
+		Limit:             *limit,
+		MCPURL:            *mcpURL,
+		SignozInternalURL: *signozInternalURL,
+		Presentation:      sidekickCfg.Presentation,
+		LLM:               sidekickCfg.LLM,
 	})
 	if err != nil {
 		return err
@@ -210,10 +217,11 @@ func runDiagnose(args []string) error {
 }
 
 // rcaConfig holds everything needed to construct a live Track C *rca.Agent:
-// which SigNoz to read from, whether to gather evidence via MCP, and where
-// the presentation-rule thresholds live. It is the shared shape `diagnose`
-// and `watch` both build from, so an agent is wired up exactly once, the
-// same way, regardless of who triggers a diagnosis (PRD section 7).
+// which SigNoz to read from, whether to gather evidence via MCP, and the
+// LLM/presentation settings loaded from sidekick.yaml (PRD section 18). It
+// is the shared shape `diagnose` and `watch` both build from, so an agent
+// is wired up exactly once, the same way, regardless of who triggers a
+// diagnosis (PRD section 7).
 type rcaConfig struct {
 	SignozURL string
 	APIKey    string
@@ -224,8 +232,9 @@ type rcaConfig struct {
 	// SignozInternalURL is the SigNoz URL the MCP server should use to
 	// reach SigNoz (sent as the X-SigNoz-URL header); required when MCPURL
 	// is set.
-	SignozInternalURL      string
-	PresentationConfigPath string
+	SignozInternalURL string
+	Presentation      config.PresentationConfig
+	LLM               config.LLMConfig
 }
 
 // buildRCAAgent constructs a *rca.Agent wired for live SigNoz evidence
@@ -244,14 +253,13 @@ func buildRCAAgent(ctx context.Context, cfg rcaConfig) (*rca.Agent, *signoz.Clie
 
 	client := signoz.NewClient(cfg.SignozURL, cfg.APIKey)
 
-	presentationConfig, err := rca.LoadPresentationConfig(cfg.PresentationConfigPath)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	agent := &rca.Agent{
-		Gate:         &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, cfg.Limit)},
-		Presentation: presentationConfig,
+		Gate: &rca.SourceEvidenceGate{Source: signoz.NewTelemetrySource(client, cfg.Limit)},
+		// config.PresentationConfig mirrors rca.PresentationConfig
+		// field-for-field so this is a plain type conversion, not a
+		// field-by-field copy - see config.Config.Presentation's comment
+		// for why the two types are not the same one (import cycle).
+		Presentation: rca.PresentationConfig(cfg.Presentation),
 	}
 
 	var toolCaller rca.MCPToolCaller
@@ -271,14 +279,21 @@ func buildRCAAgent(ctx context.Context, cfg rcaConfig) (*rca.Agent, *signoz.Clie
 		}
 	}
 
-	// Preflight the real LLM reasoner: fail clearly here if the OpenRouter
-	// API key is missing rather than silently falling back to a stub and
-	// producing a diagnosis nobody should trust.
-	reasoner, err := rca.NewLLMReasonerFromEnv(toolCaller, toolSchemas)
+	// The LLM API key is resolved (and its presence required) at
+	// config.LoadForRCA/Load time already; reading it again here means a
+	// key rotated between load and this call is still caught, and keeps
+	// this function the single place that builds the reasoner.
+	llmAPIKey, err := cfg.LLM.APIKey()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("rca: %w", err)
 	}
-	agent.Reasoner = reasoner
+	agent.Reasoner = &rca.LLMReasoner{
+		APIKey:      llmAPIKey,
+		Model:       cfg.LLM.Model,
+		BaseURL:     cfg.LLM.BaseURL,
+		Tools:       toolCaller,
+		ToolSchemas: toolSchemas,
+	}
 
 	return agent, client, nil
 }

@@ -51,7 +51,6 @@ func runWatch(args []string) error {
 	mcpURL := fs.String("mcp-url", os.Getenv("SIGNOZ_MCP_URL"), "SigNoz MCP server URL; when set, evidence is gathered live via MCP tools instead of the M1 telemetry-source placeholder")
 	signozInternalURL := fs.String("signoz-internal-url", os.Getenv("SIGNOZ_INTERNAL_URL"), "SigNoz URL the MCP server should use to reach SigNoz (sent as the X-SigNoz-URL header); required when --mcp-url is set")
 	sloConfigPath := fs.String("slo-config", "examples/support-agent-slo.yaml", "SLO YAML path used to ground each diagnosis's grounding facts (SLO state, burn rate, error budget, telemetry trust)")
-	presentationConfigPath := fs.String("presentation-config", envOr("SIDEKICK_CONFIG", "sidekick.yaml"), "presentation rule config YAML path (PRD 13.4); a missing file falls back to built-in defaults")
 	window := fs.String("window", "1h", "default lookback window for evidence gathering when a human triggers a diagnosis (e.g. via /diagnose)")
 	webhookListen := fs.String("webhook-listen", envOr("SIDEKICK_WEBHOOK_LISTEN", "127.0.0.1:8082"), "listen address for the SigNoz alertmanager webhook (PRD section 12)")
 	if err := fs.Parse(args); err != nil {
@@ -61,6 +60,8 @@ func runWatch(args []string) error {
 		return err
 	}
 
+	// One sidekick.yaml (PRD section 18) covers Slack, the LLM provider, and
+	// the presentation-rule thresholds; watch needs all three.
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		// Loading is strict about credentials on purpose: a missing or swapped
@@ -68,17 +69,20 @@ func runWatch(args []string) error {
 		return err
 	}
 
-	return watchWithConfig(cfg.Notify.Slack, rcaConfig{
-		SignozURL:              *signozURL,
-		APIKey:                 *apiKey,
-		Limit:                  *limit,
-		MCPURL:                 *mcpURL,
-		SignozInternalURL:      *signozInternalURL,
-		PresentationConfigPath: *presentationConfigPath,
+	return watchWithConfig(cfg, rcaConfig{
+		SignozURL:         *signozURL,
+		APIKey:            *apiKey,
+		Limit:             *limit,
+		MCPURL:            *mcpURL,
+		SignozInternalURL: *signozInternalURL,
+		Presentation:      cfg.Presentation,
+		LLM:               cfg.LLM,
 	}, *sloConfigPath, *window, *webhookListen, os.Getenv("SIDEKICK_WEBHOOK_SECRET"))
 }
 
-func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, window, webhookListen, webhookSecret string) error {
+func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, window, webhookListen, webhookSecret string) error {
+	cfg := fullCfg.Notify.Slack
+
 	// Metrics are optional: when no meter provider is configured the global one
 	// is a no-op, so the adapter runs identically without a collector.
 	metrics, err := sidekickslack.NewMetrics(otel.Meter("sre-sidekick"))

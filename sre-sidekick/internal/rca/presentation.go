@@ -2,9 +2,6 @@ package rca
 
 import (
 	"fmt"
-	"os"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
 )
@@ -94,43 +91,19 @@ var defaultPresentationConfig = PresentationConfig{
 }
 
 // DefaultPresentationConfig returns the built-in defaults, for callers
-// that want them explicitly (e.g. as a base to override in tests) rather
-// than via LoadPresentationConfig's empty-path fallback.
+// that want them explicitly (e.g. as a base to override in tests).
 func DefaultPresentationConfig() PresentationConfig {
 	return defaultPresentationConfig
 }
 
-// LoadPresentationConfig reads a PresentationConfig from a sidekick.yaml
-// -shaped file at path. An empty path, or a path that does not exist,
-// returns DefaultPresentationConfig() rather than an error - the
-// presentation rules must work even when nobody has written a config file
-// yet. A present-but-invalid file (unreadable, or not valid YAML) is still
-// an error: silently ignoring a broken config could mask a typo that
-// makes the rule set behave differently than the operator intended.
-// Any field left unset (zero-valued) in the file falls back to the
-// corresponding default (withDefaults).
-func LoadPresentationConfig(path string) (PresentationConfig, error) {
-	if path == "" {
-		return defaultPresentationConfig, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return defaultPresentationConfig, nil
-		}
-		return PresentationConfig{}, fmt.Errorf("rca: read presentation config %q: %w", path, err)
-	}
-	var cfg PresentationConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return PresentationConfig{}, fmt.Errorf("rca: parse presentation config %q: %w", path, err)
-	}
-	return cfg.withDefaults(), nil
-}
-
-// withDefaults fills every zero-valued field with its default, so a
-// config file that only overrides one threshold (e.g. just
+// WithDefaults fills every zero-valued field with its default, so a config
+// file that only overrides one threshold (e.g. just
 // concentration_threshold) does not accidentally zero out the rest.
-func (c PresentationConfig) withDefaults() PresentationConfig {
+//
+// Loading sidekick.yaml itself is internal/config's job (PRD section 18: one
+// file, one schema, one loader) - this package only consumes the resulting
+// struct, via this method and Decide/Present's own internal calls to it.
+func (c PresentationConfig) WithDefaults() PresentationConfig {
 	if c.MinErrorSamples <= 0 {
 		c.MinErrorSamples = defaultPresentationConfig.MinErrorSamples
 	}
@@ -224,7 +197,7 @@ func supportingSignals(signals Signals, cfg PresentationConfig) SupportingSignal
 // from being overridden into false certainty, while never letting the
 // model's certainty alone force a Conclusion the signals do not support.
 func Decide(signals Signals, md ModelDiagnosis, cfg PresentationConfig) Mode {
-	cfg = cfg.withDefaults()
+	cfg = cfg.WithDefaults()
 
 	if signals.ErrorSampleCount < cfg.MinErrorSamples {
 		return ModeCouldNotDetermine
@@ -252,7 +225,7 @@ func Decide(signals Signals, md ModelDiagnosis, cfg PresentationConfig) Mode {
 // looked because the telemetry was untrustworthy" apart from "we looked,
 // and there was nothing conclusive there".
 func couldNotDetermineReason(signals Signals, cfg PresentationConfig) []string {
-	cfg = cfg.withDefaults()
+	cfg = cfg.WithDefaults()
 	var reasons []string
 	if signals.ErrorSampleCount < cfg.MinErrorSamples {
 		reasons = append(reasons, fmt.Sprintf(
