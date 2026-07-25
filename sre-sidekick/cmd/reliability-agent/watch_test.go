@@ -61,6 +61,23 @@ func TestRunWatchFailsFastOnCredentials(t *testing.T) {
 	}
 }
 
+// The alert-driven webhook receiver fails closed with no secret configured
+// (detect.Handler refuses every request), so a missing secret must stop
+// watch at startup rather than serve a receiver that can never accept
+// anything (PRD section 19).
+func TestRunWatchRequiresAWebhookSecret(t *testing.T) {
+	path := writeWatchConfig(t, watchConfig)
+
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-test")
+	t.Setenv("SLACK_APP_TOKEN", "xapp-test")
+	t.Setenv("SIDEKICK_WEBHOOK_SECRET", "")
+
+	err := runWatch([]string{"--config", path})
+	if err == nil || !strings.Contains(err.Error(), "SIDEKICK_WEBHOOK_SECRET") {
+		t.Fatalf("error = %v, want the missing webhook secret named", err)
+	}
+}
+
 func TestRunWatchRejectsUnknownFlags(t *testing.T) {
 	if err := runWatch([]string{"--nonsense"}); err == nil {
 		t.Fatal("runWatch() error = nil, want a flag error")

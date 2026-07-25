@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/detect"
 	sidekickslack "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify/slack"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/session"
@@ -32,12 +34,14 @@ const DefaultConfigPath = "configs/sidekick.yaml"
 // arrives.
 const reapInterval = time.Minute
 
+// webhookShutdownTimeout bounds how long the webhook server is given to
+// finish in-flight requests when watch shuts down.
+const webhookShutdownTimeout = 5 * time.Second
+
 // runWatch runs the Slack adapter: it dials Slack over Socket Mode, routes
-// inbound events into incident sessions, and sweeps idle ones.
-//
-// It deliberately does not serve HTTP. The alert webhook that starts an
-// alert-driven diagnosis belongs to the detection track; when it exists, it
-// calls Coordinator.Announce and everything below is unchanged.
+// inbound events into incident sessions, sweeps idle ones, and - the
+// alert-driven detect stage (PRD section 12) - serves the SigNoz
+// alertmanager webhook that starts an autonomous diagnosis.
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	configPath := fs.String("config", DefaultConfigPath, "path to sidekick.yaml")
@@ -49,6 +53,7 @@ func runWatch(args []string) error {
 	sloConfigPath := fs.String("slo-config", "examples/support-agent-slo.yaml", "SLO YAML path used to ground each diagnosis's grounding facts (SLO state, burn rate, error budget, telemetry trust)")
 	presentationConfigPath := fs.String("presentation-config", envOr("SIDEKICK_CONFIG", "sidekick.yaml"), "presentation rule config YAML path (PRD 13.4); a missing file falls back to built-in defaults")
 	window := fs.String("window", "1h", "default lookback window for evidence gathering when a human triggers a diagnosis (e.g. via /diagnose)")
+	webhookListen := fs.String("webhook-listen", envOr("SIDEKICK_WEBHOOK_LISTEN", "127.0.0.1:8082"), "listen address for the SigNoz alertmanager webhook (PRD section 12)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -70,10 +75,10 @@ func runWatch(args []string) error {
 		MCPURL:                 *mcpURL,
 		SignozInternalURL:      *signozInternalURL,
 		PresentationConfigPath: *presentationConfigPath,
-	}, *sloConfigPath, *window)
+	}, *sloConfigPath, *window, *webhookListen, os.Getenv("SIDEKICK_WEBHOOK_SECRET"))
 }
 
-func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, window string) error {
+func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, window, webhookListen, webhookSecret string) error {
 	// Metrics are optional: when no meter provider is configured the global one
 	// is a no-op, so the adapter runs identically without a collector.
 	metrics, err := sidekickslack.NewMetrics(otel.Meter("sre-sidekick"))
@@ -89,6 +94,15 @@ func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, wi
 	appToken, err := cfg.AppToken()
 	if err != nil {
 		return err
+	}
+
+	if webhookSecret == "" {
+		// Fail here, at startup, exactly like a missing Slack or SigNoz
+		// credential - a webhook receiver with no secret would refuse every
+		// request anyway (detect.Handler fails closed), so surface the
+		// misconfiguration loudly rather than serve a receiver that can never
+		// accept anything (PRD section 19).
+		return fmt.Errorf("SIDEKICK_WEBHOOK_SECRET is required (the alert-driven webhook receiver refuses every request without it)")
 	}
 
 	api := slackapi.New(botToken, slackapi.OptionAppLevelToken(appToken))
@@ -138,6 +152,24 @@ func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, wi
 		return err
 	}
 
+	// The alert-driven detect stage (PRD section 12): a SigNoz notification
+	// channel posts here, and Diagnose/Announce run through exactly the same
+	// RCA pipeline and Coordinator the /diagnose slash command uses.
+	webhookHandler := detect.NewHandler(webhookSecret, rcaAdapter, coordinator)
+	webhookServer := &http.Server{Addr: webhookListen, Handler: webhookHandler}
+	webhookErrs := make(chan error, 1)
+	go func() {
+		defer close(webhookErrs)
+		if err := webhookServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			webhookErrs <- fmt.Errorf("webhook server: %w", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), webhookShutdownTimeout)
+		defer cancel()
+		_ = webhookServer.Shutdown(shutdownCtx)
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -146,12 +178,25 @@ func watchWithConfig(cfg config.SlackConfig, rcaCfg rcaConfig, sloConfigPath, wi
 		"default_environment", cfg.DefaultEnvironment,
 		"session_ttl", ttl.String(),
 		"max_concurrent_rca", cfg.MaxConcurrentRCA,
+		"webhook_listen", webhookListen,
 		// Credentials are reported by variable name only, never by value.
 		"bot_token_env", cfg.BotTokenEnv,
 		"app_token_env", cfg.AppTokenEnv,
 	)
 
-	return supervise(ctx, socket, receiver, coordinator)
+	err = supervise(ctx, socket, receiver, coordinator)
+
+	// The webhook server's own goroutine has nothing else to synchronize
+	// with, so drain it non-blockingly rather than making supervise (and
+	// every existing test that constructs it) aware of a fifth component.
+	select {
+	case webhookErr, ok := <-webhookErrs:
+		if ok && webhookErr != nil && err == nil {
+			err = webhookErr
+		}
+	default:
+	}
+	return err
 }
 
 // socketRunner is the part of *socketmode.Client the supervisor drives, kept

@@ -45,12 +45,18 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 		return notify.Diagnosis{}, fmt.Errorf("rca: ground incident: %w", err)
 	}
 
+	window := req.Window
+	if window == "" {
+		window = a.window()
+	}
+
 	incident := Incident{
 		CorrelationID: fmt.Sprintf("slack-%s-%s-%d", req.Service, req.Environment, a.now().UnixNano()),
 		Service:       req.Service,
 		Environment:   req.Environment,
-		Window:        a.window(),
+		Window:        window,
 		SLO:           sloName,
+		Alert:         req.Alert,
 		Grounding:     grounding,
 	}
 	return a.Agent.Diagnose(ctx, incident)

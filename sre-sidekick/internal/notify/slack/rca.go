@@ -32,7 +32,15 @@ type DiagnoseRequest struct {
 	Service     string
 	Environment string
 	// RequestedBy is the Slack user id that asked, for the audit trail.
+	// Empty for an alert-driven diagnosis - nobody asked, an alert did.
 	RequestedBy string
+	// Window overrides the RCA's default evidence-gathering lookback
+	// window (e.g. "5m" for a fast-burn alert). Empty means "use the
+	// Diagnoser's own default", which is what the /diagnose command wants.
+	Window string
+	// Alert names which alert triggered this diagnosis (e.g. "fast-burn"),
+	// for the reasoner's context. Empty for a human-triggered diagnosis.
+	Alert string
 }
 
 // FollowupRequest carries everything needed to answer one question in context.
