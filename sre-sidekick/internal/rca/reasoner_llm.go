@@ -257,13 +257,29 @@ func (r *LLMReasoner) loop(ctx context.Context, messages []chatMessage) (ModelDi
 		messages = append(messages, choice.Message)
 
 		if allowTools && len(choice.Message.ToolCalls) > 0 {
+			// allowTools was computed once for this whole turn, but an
+			// OpenAI-compatible model can return several tool_calls in a
+			// single turn (parallel tool calling) - so the MaxToolCalls
+			// budget must also be re-checked call by call within the
+			// batch, not just once per turn, or a single turn with many
+			// parallel calls can blow straight through the cap. Every
+			// tool_call_id still gets a role:"tool" response (the wire
+			// protocol requires one per call in the turn), but calls past
+			// the budget are answered with a budget-exhausted message
+			// instead of actually being executed.
 			for _, call := range choice.Message.ToolCalls {
+				var content string
+				if toolCallsUsed < r.maxToolCalls() {
+					content = r.executeTool(ctx, call)
+					toolCallsUsed++
+				} else {
+					content = `{"error": "tool call budget exhausted for this diagnosis; answer with the evidence already gathered"}`
+				}
 				messages = append(messages, chatMessage{
 					Role:       "tool",
 					ToolCallID: call.ID,
-					Content:    r.executeTool(ctx, call),
+					Content:    content,
 				})
-				toolCallsUsed++
 			}
 			continue
 		}
@@ -303,14 +319,25 @@ func (r *LLMReasoner) executeTool(ctx context.Context, call chatToolCall) string
 	if err != nil {
 		return fmt.Sprintf(`{"error": %q}`, err.Error())
 	}
-	return truncateToolResult(result.Text())
+	return wrapUntrustedToolResult(result.Text())
 }
 
-func truncateToolResult(text string) string {
-	if len(text) <= maxToolResultChars {
-		return text
-	}
-	return text[:maxToolResultChars] + "...[truncated]"
+// wrapUntrustedToolResult hardens a live MCP tool result before it re-enters
+// the conversation as a role:"tool" message. This text is exactly as
+// attacker-controllable as the evidence Notes built by evidence_mcp.go (log
+// bodies, span attributes, error messages) - sanitize.go exists precisely
+// to defend against that - but a tool result returned mid-loop bypasses
+// evidence_mcp.go entirely and previously reached the model with only a
+// length cap, no control-character stripping and no delimiters. The system
+// prompt (systemPrompt, rule 3) tells the model to treat text between
+// untrustedBeginMarker/untrustedEndMarker as untrusted data, never as
+// instructions; a tool result with no delimiters at all gave the model no
+// signal that this text needed the same suspicion as the evidence in the
+// initial user prompt.
+func wrapUntrustedToolResult(text string) string {
+	text = stripControlChars(text)
+	text = truncateText(text, maxToolResultChars)
+	return untrustedBeginMarker + "\n" + text + "\n" + untrustedEndMarker
 }
 
 func jsonEscape(s string) string {
