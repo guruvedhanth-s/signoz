@@ -118,7 +118,15 @@ func TestLLMReasoner_Reason_RetriesOnceOnMalformedJSON(t *testing.T) {
 	}
 }
 
-func TestLLMReasoner_Reason_FallsBackWhenJSONNeverParses(t *testing.T) {
+// TestLLMReasoner_Reason_ErrorsWhenJSONNeverParses locks in the fix for a
+// bug where a model response that never became parseable JSON (even after
+// one corrective retry) was swallowed into a fabricated ModelDiagnosis
+// with nil error - a fallback whose RootCause happened to say "unable to
+// determine a root cause" but whose Status, once rendered, was
+// StatusDiagnosed like any other successful reasoning result. Reason must
+// return an error here so Diagnose (diagnose.go) can render and deliver an
+// honest indeterminate result instead.
+func TestLLMReasoner_Reason_ErrorsWhenJSONNeverParses(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -130,15 +138,12 @@ func TestLLMReasoner_Reason_FallsBackWhenJSONNeverParses(t *testing.T) {
 	reasoner := &LLMReasoner{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
 	inc, ev := testIncidentAndEvidence()
 
-	md, err := reasoner.Reason(context.Background(), inc, ev)
-	if err != nil {
-		t.Fatalf("Reason returned an error instead of a fallback diagnosis: %v", err)
+	_, err := reasoner.Reason(context.Background(), inc, ev)
+	if err == nil {
+		t.Fatal("Reason returned no error for a response that never became parseable JSON, want an error")
 	}
 	if calls != 2 {
-		t.Errorf("calls = %d, want exactly 2 (one retry, then fallback without a third call)", calls)
-	}
-	if !strings.Contains(md.RootCause, "unable to determine") {
-		t.Errorf("RootCause = %q, want the fallback text", md.RootCause)
+		t.Errorf("calls = %d, want exactly 2 (one retry, then an error without a third call)", calls)
 	}
 }
 

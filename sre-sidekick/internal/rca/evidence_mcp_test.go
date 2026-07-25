@@ -61,6 +61,11 @@ func baseIncident() Incident {
 		Service:       "support-agent",
 		Environment:   "local",
 		Window:        "1h",
+		// Grounding.TelemetryTrusted defaults false; most callers of this
+		// helper exercise the "telemetry is trusted, evaluate the
+		// evidence/reasoner path" scenario, so it is set true here rather
+		// than at every call site.
+		Grounding: notify.Grounding{TelemetryTrusted: true},
 	}
 }
 

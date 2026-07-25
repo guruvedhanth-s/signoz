@@ -233,10 +233,16 @@ func buildUserPrompt(inc Incident, ev []notify.Evidence) string {
 // loop drives the bounded tool-calling conversation: it sends completion
 // requests, executes any tool calls the model makes (up to MaxToolCalls),
 // and returns the first parseable JSON diagnosis. If the model's final
-// answer is not valid JSON, it retries once with a corrective message. If
-// it still cannot parse a diagnosis, it returns a clearly-labeled fallback
-// rather than an error, so a flaky model response does not crash the
-// diagnose pipeline.
+// answer is not valid JSON, it retries once with a corrective message.
+//
+// If it still cannot parse a diagnosis (or the request budget runs out),
+// loop returns an error rather than a fabricated ModelDiagnosis: a
+// Reasoner's whole contract is "author the free text a human will read as
+// a stated root cause", so a response that never became a valid diagnosis
+// must never silently become one anyway. Diagnose (diagnose.go) turns a
+// Reason error into an explicit indeterminate result delivered to the
+// Notifier - never into a diagnosis whose RootCause happens to say "I
+// couldn't determine this".
 func (r *LLMReasoner) loop(ctx context.Context, messages []chatMessage) (ModelDiagnosis, error) {
 	toolCallsUsed := 0
 	jsonRetried := false
@@ -276,9 +282,9 @@ func (r *LLMReasoner) loop(ctx context.Context, messages []chatMessage) (ModelDi
 			})
 			continue
 		}
-		return fallbackDiagnosis(), nil
+		return ModelDiagnosis{}, fmt.Errorf("rca: model did not return a parseable diagnosis after a retry: %w", parseErr)
 	}
-	return fallbackDiagnosis(), nil
+	return ModelDiagnosis{}, fmt.Errorf("rca: exceeded %d LLM round trips without a parseable diagnosis", maxRequests)
 }
 
 // executeTool calls one model-requested tool via r.Tools and returns the
@@ -524,16 +530,4 @@ func stripCodeFence(s string) string {
 	}
 	s = strings.TrimSuffix(strings.TrimSpace(s), "```")
 	return strings.TrimSpace(s)
-}
-
-// fallbackDiagnosis is returned when the model never produces a parseable
-// diagnosis (even after one retry), so a flaky or malformed model response
-// degrades gracefully instead of crashing the diagnose pipeline. Render
-// still attaches the real evidence gathered for the incident, so a human
-// reviewing this diagnosis is not left with nothing.
-func fallbackDiagnosis() ModelDiagnosis {
-	return ModelDiagnosis{
-		RootCause:   "unable to determine a root cause: the reasoning model did not return a parseable diagnosis after a retry. Review the attached evidence manually.",
-		ProposedFix: "re-run diagnosis, or investigate the attached evidence directly; this fallback is not a real conclusion.",
-	}
 }
