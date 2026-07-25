@@ -222,6 +222,23 @@ func evidenceBlocks(evidence []notify.Evidence) []slack.Block {
 	return blocks
 }
 
+// ResolvedBlocks re-renders a message with its decision buttons retired and
+// the outcome stated in their place.
+//
+// A decided incident must never show a live-looking Approve button: during an
+// incident that is actively misleading, and a second click on a stale button
+// is exactly the double-decision the session layer has to defend against.
+func ResolvedBlocks(blocks []slack.Block, notice string) []slack.Block {
+	resolved := make([]slack.Block, 0, len(blocks)+1)
+	for _, block := range blocks {
+		if _, isAction := block.(*slack.ActionBlock); isAction {
+			continue
+		}
+		resolved = append(resolved, block)
+	}
+	return append(resolved, slack.NewSectionBlock(markdownText(notice), nil, nil))
+}
+
 const irreversibleMarker = ":warning: *irreversible*"
 
 func proposedFixBlocks(d notify.Diagnosis) []slack.Block {
