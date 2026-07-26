@@ -19,8 +19,8 @@ type stubWordsmith struct {
 	seen  string
 }
 
-func (s *stubWordsmith) Phrase(_ context.Context, prompt string) (string, error) {
-	s.seen = prompt
+func (s *stubWordsmith) Phrase(_ context.Context, prompt Prompt) (string, error) {
+	s.seen = prompt.System + "\n" + prompt.User
 	if s.err != nil {
 		return "", s.err
 	}
@@ -51,11 +51,14 @@ func TestPromptContainsNoRawFloats(t *testing.T) {
 	env := statusEnvelope()
 	env.Data.SLOs[0].BurnRate = 3.6363636363636322
 	prompt := BuildPrompt(FactsFrom(env))
-	if strings.Contains(prompt, "3.6363636363636322") {
+	if strings.Contains(prompt.User, "3.6363636363636322") {
 		t.Fatal("prompt leaked a raw float; the model must never see an unformatted number")
 	}
-	if !strings.Contains(prompt, "3.6x") {
-		t.Errorf("prompt lacks the formatted burn rate:\n%s", prompt)
+	if !strings.Contains(prompt.User, "3.6x") {
+		t.Errorf("prompt lacks the formatted burn rate:\n%s", prompt.User)
+	}
+	if !strings.Contains(prompt.System, "copied EXACTLY") {
+		t.Error("rules did not land in the system message")
 	}
 }
 
@@ -250,8 +253,8 @@ func TestBackendWarningTextNeverReachesThePrompt(t *testing.T) {
 	}
 	facts := FactsFrom(env)
 	prompt := BuildPrompt(facts)
-	if strings.Contains(strings.ToUpper(prompt), "IGNORE PREVIOUS INSTRUCTIONS") {
-		t.Fatalf("backend-authored warning text reached the prompt:\n%s", prompt)
+	if strings.Contains(strings.ToUpper(prompt.System+prompt.User), "IGNORE PREVIOUS INSTRUCTIONS") {
+		t.Fatalf("backend-authored warning text reached the prompt:\n%s", prompt.User)
 	}
 	if !strings.Contains(facts.Caveat, "query-completeness warning") {
 		t.Errorf("the warning was dropped without saying one existed: %q", facts.Caveat)

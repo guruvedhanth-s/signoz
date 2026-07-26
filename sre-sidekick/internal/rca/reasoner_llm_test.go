@@ -405,3 +405,63 @@ func TestNewLLMReasonerFromEnv_HonorsOverrides(t *testing.T) {
 		t.Errorf("BaseURL = %q, want the overridden URL", reasoner.BaseURL)
 	}
 }
+
+func TestLLMReasoner_CompleteText_SendsRolesAndNoTools(t *testing.T) {
+	var gotSystem, gotUser string
+	var gotTools int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := decodeRequestBody(t, r)
+		for _, m := range req.Messages {
+			switch m.Role {
+			case "system":
+				gotSystem = m.Content
+			case "user":
+				gotUser = m.Content
+			}
+		}
+		gotTools = len(req.Tools)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"  the service is unhealthy over the last hour.  "}}]}`))
+	}))
+	defer server.Close()
+
+	reasoner := &LLMReasoner{
+		APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client(),
+		// Tool schemas are set precisely to prove CompleteText ignores
+		// them: a wording call must never turn into a paid evidence hunt.
+		ToolSchemas: []ToolSchema{{Name: "search", Description: "search"}},
+	}
+	text, err := reasoner.CompleteText(context.Background(), "RULES", "FACTS")
+	if err != nil {
+		t.Fatalf("CompleteText: %v", err)
+	}
+	if text != "the service is unhealthy over the last hour." {
+		t.Errorf("text = %q; want it trimmed", text)
+	}
+	if gotSystem != "RULES" || gotUser != "FACTS" {
+		t.Errorf("roles = %q/%q, want RULES/FACTS", gotSystem, gotUser)
+	}
+	if gotTools != 0 {
+		t.Errorf("request carried %d tools, want 0", gotTools)
+	}
+}
+
+func TestLLMReasoner_CompleteText_RequiresAPIKey(t *testing.T) {
+	reasoner := &LLMReasoner{}
+	if _, err := reasoner.CompleteText(context.Background(), "s", "u"); err == nil {
+		t.Fatal("CompleteText ran without an API key")
+	}
+}
+
+func TestLLMReasoner_CompleteText_RejectsEmptyCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"   "}}]}`))
+	}))
+	defer server.Close()
+
+	reasoner := &LLMReasoner{APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()}
+	if _, err := reasoner.CompleteText(context.Background(), "s", "u"); err == nil {
+		t.Fatal("an empty completion was accepted as wording")
+	}
+}

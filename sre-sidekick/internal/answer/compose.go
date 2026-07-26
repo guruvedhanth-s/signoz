@@ -20,7 +20,16 @@ type Wordsmith interface {
 	// An error means "no wording available", which is a normal condition -
 	// no key configured, rate limited, over budget - and must degrade to
 	// the template rather than fail the answer.
-	Phrase(ctx context.Context, prompt string) (string, error)
+	Phrase(ctx context.Context, prompt Prompt) (string, error)
+}
+
+// Prompt is the two-part message pair sent to a model: fixed rules, and
+// the facts for one answer. They are separate fields rather than one
+// concatenated string so the rules land in the system role, where a model
+// weights them more heavily than anything in the user turn.
+type Prompt struct {
+	System string `json:"system"`
+	User   string `json:"user"`
 }
 
 // AnswerSource records how an answer's wording was produced. It is
@@ -132,14 +141,13 @@ RULES:
 5. If the facts say the answer is indeterminate, say so plainly and give the stated reason. Do not soften it, do not guess, and do not offer a number.
 6. Two or three sentences at most. No bullet lists, no headings, no markdown, no emoji.`
 
-// BuildPrompt renders Facts into the user message. Every value is already
-// a string; nothing here is formatted at prompt-build time, so what the
+// BuildPrompt renders Facts into a system/user pair. Every value is
+// already a string; nothing is formatted at prompt-build time, so what the
 // verifier allows and what the model is shown are the same set by
 // construction.
-func BuildPrompt(facts Facts) string {
+func BuildPrompt(facts Facts) Prompt {
 	var b strings.Builder
-	b.WriteString(composerSystemPrompt)
-	b.WriteString("\n\nINTENT: ")
+	b.WriteString("INTENT: ")
 	b.WriteString(facts.Intent)
 	if scope := scopeLabel(facts); scope != "" {
 		b.WriteString("\nSCOPE: ")
@@ -176,5 +184,5 @@ func BuildPrompt(facts Facts) string {
 		}
 	}
 	b.WriteString("\n\nWrite the reply now.")
-	return b.String()
+	return Prompt{System: composerSystemPrompt, User: b.String()}
 }
