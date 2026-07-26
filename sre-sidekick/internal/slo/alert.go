@@ -22,7 +22,7 @@ func BuildBurnRateRule(sloName string, tier BurnTier, channel string, scope ...s
 		"condition": map[string]any{
 			"compositeQuery": map[string]any{"queryType": "builder", "queries": []any{map[string]any{
 				"type": "builder_query", "spec": map[string]any{
-					"name": "A", "signal": "metrics", "aggregations": []any{map[string]any{"metricName": "slo_burn_rate", "spaceAggregation": "max"}},
+					"name": "A", "signal": "metrics", "aggregations": []any{map[string]any{"metricName": "slo_mwmb_firing", "spaceAggregation": "max"}},
 					"filter": map[string]any{"expression": filter}, "stepInterval": "1m",
 				},
 			}}},

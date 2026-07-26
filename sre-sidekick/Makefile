@@ -1,10 +1,16 @@
-.PHONY: fmt test run run-log-demo watch-logs
+.PHONY: fmt test vet demo run run-log-demo watch-logs
 
 fmt:
 	gofmt -w cmd internal
 
 test:
 	go test ./...
+
+vet:
+	go vet ./...
+
+demo:
+	go test -v ./integration -run 'TestCompleteAuthenticatedAPIAndSLOFlow|TestCompleteAuditWatchFiringAndRecoveryFlow'
 
 run:
 	go run ./cmd/reliability-agent

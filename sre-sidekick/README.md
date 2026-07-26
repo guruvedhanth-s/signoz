@@ -307,6 +307,19 @@ go run ./cmd/reliability-agent audit-watch \
 The webhook receives the same firing and resolved JSON documents printed by the
 watcher.
 
+To send Slack-compatible messages directly through a Slack Incoming Webhook:
+
+```bash
+export SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...'
+go run ./cmd/reliability-agent audit-watch \
+  --profile examples/log-demo-backend.yaml \
+  --slack-webhook-url "$SLACK_WEBHOOK_URL"
+```
+
+The Slack sink converts each event into a Slack payload with a `text` field.
+Use `--webhook-url` separately when an integration needs the original
+SRE Sidekick event JSON.
+
 ## Run an SLO evaluation
 
 ```bash
@@ -385,6 +398,17 @@ Or run directly:
 go test ./...
 go vet ./...
 ```
+
+Run the complete local workflow demo without a live SigNoz installation:
+
+```bash
+make demo
+```
+
+The demo uses an in-process SigNoz API stub and webhook receiver, but exercises
+the real authenticated API, profile registration and activation, Track A audit,
+Track B SLO evaluation, completeness gate, alert debounce, webhook delivery,
+and recovery transition. A live demo still requires the prerequisites above.
 
 Convenience targets:
 
