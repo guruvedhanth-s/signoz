@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,7 @@ type Receiver struct {
 	workers     int
 	queueSize   int
 	workTimeout time.Duration
+	botUserID   string
 
 	dedup *dedupCache
 	now   func() time.Time
@@ -128,6 +130,17 @@ func WithWorkTimeout(timeout time.Duration) ReceiverOption {
 		if timeout > 0 {
 			r.workTimeout = timeout
 		}
+	}
+}
+
+// WithBotUserID sets the bot user id returned by auth.test. When a plain
+// message delivery starts with this handle, the receiver drops it and lets
+// Slack's app_mention delivery handle the turn. Without the id, the receiver
+// cannot tell @sidekick from @alice, so it keeps leading-handle messages on the
+// ordinary Message path rather than risking a false copilot answer.
+func WithBotUserID(userID string) ReceiverOption {
+	return func(r *Receiver) {
+		r.botUserID = strings.TrimSpace(userID)
 	}
 }
 
@@ -329,13 +342,10 @@ func (r *Receiver) decode(event socketmode.Event) (job, bool) {
 			// handle to look for and no unrelated conversation to barge into.
 			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
 		}
-		if stripHandle(msg.Text) != msg.Text {
-			// A leading handle on a plain message is not enough to decide the
-			// sidekick was addressed: it might be @alice. Keep it a Message,
-			// but key it by turn so the paired app_mention delivery for
-			// @sidekick is collapsed before it can answer twice in a session
-			// thread.
-			return job{kind: "message", id: turnID(msg.ChannelID, msg.MessageTS, msg.UserID), message: &msg}, true
+		if handle := leadingHandleID(msg.Text); handle != "" && handle == r.botUserID {
+			// Slack also sends app_mention for this same turn. Drop the plain
+			// message delivery instead of racing two handlers on one dedup key.
+			return job{}, false
 		}
 		return job{kind: "message", id: eventID(apiEvent, event.Request), message: &msg}, true
 

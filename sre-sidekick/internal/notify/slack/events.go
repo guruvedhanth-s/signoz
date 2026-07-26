@@ -109,6 +109,18 @@ func stripHandle(text string) string {
 	return trimmed
 }
 
+func leadingHandleID(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "<@") {
+		return ""
+	}
+	end := strings.Index(trimmed, ">")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(trimmed[2:end])
+}
+
 // Interaction is a Block Kit button click.
 type Interaction struct {
 	// EnvelopeID is Slack's id for the delivery, used to drop duplicates.

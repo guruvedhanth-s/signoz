@@ -116,6 +116,10 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 	}
 
 	api := slackapi.New(botToken, slackapi.OptionAppLevelToken(appToken))
+	auth, err := api.AuthTestContext(context.Background())
+	if err != nil {
+		return fmt.Errorf("slack auth.test: %w", err)
+	}
 	socket := socketmode.New(api)
 
 	slackClient, err := sidekickslack.New(cfg,
@@ -217,7 +221,9 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		return err
 	}
 
-	receiver, err := sidekickslack.NewReceiver(socket.Events, socket, coordinator)
+	receiver, err := sidekickslack.NewReceiver(socket.Events, socket, coordinator,
+		sidekickslack.WithBotUserID(auth.UserID),
+	)
 	if err != nil {
 		return err
 	}

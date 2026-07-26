@@ -309,20 +309,40 @@ func TestPlainMessageAddressedToAnotherUserIsNotMention(t *testing.T) {
 }
 
 func TestAppMentionAndMessageDeliveryProduceOneTurn(t *testing.T) {
-	handler := newRecordingHandler()
-	events, _, logs, _ := startReceiver(t, handler)
+	for _, tc := range []struct {
+		name string
+		send func(chan socketmode.Event)
+	}{
+		{
+			name: "app mention first",
+			send: func(events chan socketmode.Event) {
+				events <- appMentionEvent("env-mention", "Ev-mention", "<@USIDEKICK> how is checkout doing?")
+				events <- messageEvent("env-message", "Ev-message", "<@USIDEKICK> how is checkout doing?")
+			},
+		},
+		{
+			name: "message first",
+			send: func(events chan socketmode.Event) {
+				events <- messageEvent("env-message", "Ev-message", "<@USIDEKICK> how is checkout doing?")
+				events <- appMentionEvent("env-mention", "Ev-mention", "<@USIDEKICK> how is checkout doing?")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := newRecordingHandler()
+			events, _, _, _ := startReceiver(t, handler, WithBotUserID("USIDEKICK"))
 
-	events <- appMentionEvent("env-mention", "Ev-mention", "<@USIDEKICK> how is checkout doing?")
-	events <- messageEvent("env-message", "Ev-message", "<@USIDEKICK> how is checkout doing?")
-	handler.waitFor(t, 1)
-	waitFor(t, func() bool { return strings.Contains(logs.String(), "duplicate") })
+			tc.send(events)
+			handler.waitFor(t, 1)
 
-	messages, _, _ := handler.counts()
-	if messages != 0 {
-		t.Errorf("messages = %d, want 0", messages)
-	}
-	if mentions := handler.mentionCount(); mentions != 1 {
-		t.Errorf("mentions = %d, want 1", mentions)
+			messages, _, _ := handler.counts()
+			if messages != 0 {
+				t.Errorf("messages = %d, want 0", messages)
+			}
+			if mentions := handler.mentionCount(); mentions != 1 {
+				t.Errorf("mentions = %d, want 1", mentions)
+			}
+		})
 	}
 }
 
