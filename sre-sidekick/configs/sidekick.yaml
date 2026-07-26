@@ -1,0 +1,89 @@
+# SRE Sidekick configuration (PRD section 18): one file covering the Slack
+# adapter, the RCA reasoner's LLM provider, and the section 13.4
+# presentation-rule thresholds.
+#
+# Secrets are NOT stored here. The *_env keys name the environment variables
+# that carry the credentials; the sidekick reads them from the process
+# environment at startup.
+#
+#   export SLACK_BOT_TOKEN=xoxb-...
+#   export SLACK_APP_TOKEN=xapp-...
+#   export OPENROUTER_API_KEY=sk-or-...
+
+notify:
+  slack:
+    # Env var holding the Slack bot token (xoxb-...), used for outbound calls
+    # such as posting a diagnosis.
+    bot_token_env: SLACK_BOT_TOKEN
+    # Env var holding the Slack app-level token (xapp-...), used to open the
+    # Socket Mode connection. The sidekick dials out to Slack over a
+    # WebSocket, so it exposes no inbound HTTP endpoint and needs no signing
+    # secret.
+    app_token_env: SLACK_APP_TOKEN
+    # On-call channel that diagnoses are posted to. One incident becomes one
+    # thread in this channel, and that thread is the session.
+    default_channel: "#sre-sidekick"
+    # Environment assumed when a slash command does not name one, so
+    # `/diagnose support-agent` means `/diagnose support-agent prod`.
+    default_environment: prod
+    # Idle time after which a session is auto-closed by the TTL reaper.
+    session_ttl: 30m
+    # Cap on concurrent diagnose runs, so an alert storm cannot launch
+    # unbounded LLM/MCP work.
+    max_concurrent_rca: 5
+
+# llm configures the provider driving the RCA reasoner (PRD section 21
+# decision 3: OpenRouter/DeepSeek, kept swappable behind one interface).
+# diagnose loads this section too (via --sidekick-config), so both the
+# CLI and watch always build the reasoner the same way.
+llm:
+  provider: openrouter
+  model: deepseek/deepseek-chat
+  # Env var holding the OpenRouter API key. Never stored here or in YAML.
+  api_key_env: OPENROUTER_API_KEY
+
+# presentation configures the RCA agent's rule-based presentation engine
+# (PRD section 13.4, internal/rca/presentation.go). These thresholds decide,
+# deterministically, whether a diagnosis is shown as a single conclusion,
+# ranked hypotheses, or "could not determine" - never the model's own
+# confidence.
+#
+# Every field is optional; a field left out (or the whole section missing)
+# falls back to the built-in default shown as a comment next to it (see
+# DefaultPresentationConfig in internal/rca/presentation.go).
+presentation:
+  # min_error_samples is the fewest error evidence records (trace/log
+  # evidence gathered for the incident) required before the rules will
+  # attempt any presentation beyond "could not determine". Too few samples
+  # cannot be trusted to reveal a real pattern, however concentrated they
+  # look.
+  min_error_samples: 3
+
+  # concentration_threshold is the minimum share (0..1) of error evidence
+  # that must cluster around one operation (span name) or one classified
+  # exception signature (e.g. TimeoutError) for the "errors" golden signal
+  # to be considered supported. 0.6 means at least 60% of the error evidence
+  # - or of the subset whose message could be classified into a known
+  # exception signature - must share the same operation or signature.
+  concentration_threshold: 0.6
+
+  # latency_shift_threshold is the minimum ratio of failing-request p99
+  # duration to successful-request p99 duration (both measured over the
+  # incident window) for the "latency" golden signal to be considered
+  # supported. 1.5 means failing requests must run at least 50% longer than
+  # successful ones - e.g. requests timing out well past the service's
+  # normal response time.
+  latency_shift_threshold: 1.5
+
+  # error_rate_delta_threshold is the minimum increase in error rate
+  # (errors/sec) over the immediately preceding window, of equal length,
+  # that also counts toward the "errors" golden signal being supported
+  # (alongside concentration, not instead of it).
+  error_rate_delta_threshold: 0.5
+
+  # golden_signals_for_conclusion is how many distinct golden-signal
+  # categories (errors, latency, saturation) must be supported before a
+  # diagnosis is presented as a single conclusion rather than ranked
+  # hypotheses. PRD 13.4's example - "an errors spike concentrated in one
+  # dependency span PLUS a latency shift" - is exactly 2, the default.
+  golden_signals_for_conclusion: 2

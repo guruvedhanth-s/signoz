@@ -1,3 +1,5 @@
 bin/
 *.db
 .env
+.pi/
+.signoz-api-key

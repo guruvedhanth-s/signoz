@@ -3,7 +3,6 @@ package slo
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -19,27 +18,26 @@ type MultiWindowBurn struct {
 	Indeterminate bool    `json:"indeterminate"`
 }
 
-// EvaluateMultiWindow evaluates the configured SLO queries over both windows
-// of every burn tier. It replaces the range selector in authored queries so
-// the configured service/environment scope remains intact.
+// EvaluateMultiWindow evaluates every burn tier's long and short window for
+// each configured SLO. Builder queries carry no window in the query text
+// itself - the window only ever shows up as the [start,end] range passed
+// to ScalarBuilder - so switching windows here is just a matter of
+// re-running Engine.evaluate with definition.Window set to the tier's
+// window; there is no query text to rewrite.
 func (e *Engine) EvaluateMultiWindow(ctx context.Context, cfg Config, now time.Time, tiers []BurnTier) ([]MultiWindowBurn, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if e.Scalar == nil {
-		return nil, fmt.Errorf("SLO scalar querier is required")
+	if e.Metrics == nil {
+		return nil, fmt.Errorf("SLO metric querier is required")
 	}
 	results := make([]MultiWindowBurn, 0, len(cfg.SLOs)*len(tiers))
 	for _, definition := range cfg.SLOs {
 		for _, tier := range tiers {
 			long := definition
 			long.Window = tier.LongWindow
-			long.GoodQuery = replaceWindow(definition.GoodQuery, definition.Window, tier.LongWindow)
-			long.TotalQuery = replaceWindow(definition.TotalQuery, definition.Window, tier.LongWindow)
 			short := definition
 			short.Window = tier.ShortWindow
-			short.GoodQuery = replaceWindow(definition.GoodQuery, definition.Window, tier.ShortWindow)
-			short.TotalQuery = replaceWindow(definition.TotalQuery, definition.Window, tier.ShortWindow)
 			longReport := e.evaluate(ctx, cfg, long, now)
 			shortReport := e.evaluate(ctx, cfg, short, now)
 			result := MultiWindowBurn{
@@ -53,8 +51,4 @@ func (e *Engine) EvaluateMultiWindow(ctx context.Context, cfg Config, now time.T
 		}
 	}
 	return results, nil
-}
-
-func replaceWindow(query, oldWindow, newWindow string) string {
-	return strings.ReplaceAll(query, "["+oldWindow+"]", "["+newWindow+"]")
 }

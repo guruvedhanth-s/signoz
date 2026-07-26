@@ -60,9 +60,16 @@ func (c *Client) EnsureChannel(ctx context.Context, name string, webhookURL ...s
 	}, nil)
 }
 
+// GenerateBurnRateAlert creates the named alert rule if it does not exist,
+// or updates it in place (PUT /api/v2/rules/{id}) if it does - mirroring
+// GenerateDashboard's own find-then-PUT-or-POST pattern. Previously this
+// only ever checked existence and returned early, so re-running after
+// changing a tier's burn-rate threshold silently left the stale rule in
+// place; a config change is now what it looks like it is.
 func (c *Client) GenerateBurnRateAlert(ctx context.Context, alertName string, rule map[string]any) (bool, error) {
 	var list struct {
 		Data []struct {
+			ID    string `json:"id"`
 			Alert string `json:"alert"`
 		} `json:"data"`
 	}
@@ -71,6 +78,12 @@ func (c *Client) GenerateBurnRateAlert(ctx context.Context, alertName string, ru
 	}
 	for _, existing := range list.Data {
 		if existing.Alert == alertName {
+			if existing.ID == "" {
+				return false, fmt.Errorf("SigNoz rule %q has no id to update", alertName)
+			}
+			if err := c.putJSON(ctx, "/api/v2/rules/"+existing.ID, rule, nil); err != nil {
+				return false, err
+			}
 			return false, nil
 		}
 	}

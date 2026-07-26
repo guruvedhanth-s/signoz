@@ -231,4 +231,10 @@ cython_debug/
 # LSP config files
 pyrightconfig.json
 
+# sre-sidekick / Foundry demo (PRD section 19): `foundryctl cast -f
+# casting.yaml` regenerates pours/ from the committed casting.yaml every
+# time, so it's a build artifact, not source - only casting.yaml and
+# casting.yaml.lock are committed.
+/pours/
+
 

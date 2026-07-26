@@ -22,4 +22,4 @@ run-demo-agent-buggy:
 	go run ./cmd/demo-agent --buggy
 
 watch-logs:
-	go run ./cmd/reliability-agent audit-watch --profile examples/log-demo-backend.yaml
+	go run ./cmd/reliability-agent audit-watch --profile examples/demo-agent.yaml
