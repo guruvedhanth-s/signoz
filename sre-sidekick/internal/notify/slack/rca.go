@@ -25,6 +25,11 @@ type RCA interface {
 	// AnswerFollowup answers one human question about an incident that has
 	// already been diagnosed.
 	AnswerFollowup(ctx context.Context, req FollowupRequest) (string, error)
+
+	// Verify re-evaluates the incident's SLO after a human applies a fix.
+	// The request is routed through the RCA boundary so the Slack coordinator
+	// never calls telemetry or an SLO engine directly.
+	Verify(ctx context.Context, req VerifyRequest) (VerifyResult, error)
 }
 
 // DiagnoseRequest asks for a fresh diagnosis.
@@ -107,6 +112,10 @@ func (UnavailableRCA) Diagnose(context.Context, DiagnoseRequest) (notify.Diagnos
 
 func (UnavailableRCA) AnswerFollowup(context.Context, FollowupRequest) (string, error) {
 	return "", ErrRCAUnavailable
+}
+
+func (UnavailableRCA) Verify(context.Context, VerifyRequest) (VerifyResult, error) {
+	return VerifyResult{}, ErrVerifierUnavailable
 }
 
 // followupRequest builds the request from a session's frozen state.

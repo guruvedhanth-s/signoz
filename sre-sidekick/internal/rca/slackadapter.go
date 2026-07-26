@@ -91,6 +91,18 @@ func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupReq
 	})
 }
 
+// Verify keeps the deterministic recovery check behind the RCA boundary.
+// The Slack coordinator must not call SigNoz or the SLO engine itself; this
+// adapter owns all incident analysis inputs and returns the result to Slack.
+func (a *SlackAdapter) Verify(ctx context.Context, req slack.VerifyRequest) (slack.VerifyResult, error) {
+	verifier := SLOVerifier{
+		Metrics:       a.Metrics,
+		SLOConfigPath: a.SLOConfigPath,
+		Now:           a.Now,
+	}
+	return verifier.Verify(ctx, req)
+}
+
 func (a *SlackAdapter) now() time.Time {
 	if a.Now != nil {
 		return a.Now()
