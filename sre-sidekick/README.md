@@ -302,18 +302,11 @@ go run ./cmd/reliability-agent audit-watch \
 The webhook receives the same firing and resolved JSON documents printed by the
 watcher.
 
-To send Slack-compatible messages directly through a Slack Incoming Webhook:
-
-```bash
-export SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...'
-go run ./cmd/reliability-agent audit-watch \
-  --profile examples/log-demo-backend.yaml \
-  --slack-webhook-url "$SLACK_WEBHOOK_URL"
-```
-
-The Slack sink converts each event into a Slack payload with a `text` field.
-Use `--webhook-url` separately when an integration needs the original
-SRE Sidekick event JSON.
+Slack communication is handled only by the RCA-driven `watch` command. Alerts
+must be delivered to its authenticated webhook listener; the RCA agent gathers
+evidence, produces the diagnosis, and the Slack coordinator posts the result.
+User follow-up messages are routed back through the same RCA adapter before a
+thread reply is sent. `audit-watch` does not send directly to Slack.
 
 ## Run an SLO evaluation
 
