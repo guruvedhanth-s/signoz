@@ -242,3 +242,41 @@ Answer these plainly rather than dodging; each has a real reason.
   query: the v5 API wants a metric aggregation and the source sends a raw
   `count()`. Found during this rebuild, documented in `REBUILD-LOG.md`, not on
   the demo path.
+
+## Showing the results inside SigNoz
+
+The strongest shot for "best use of SigNoz" is the dashboard the sidekick
+created, populated by metrics the sidekick emitted.
+Validated live; run these once before recording.
+
+```sh
+# Dashboard + burn-rate alert rules + notification channel
+go run ./cmd/reliability-agent generate \
+  --config examples/support-agent-slo-demo.yaml \
+  --webhook-url "$SIDEKICK_WEBHOOK_URL"
+
+# SLO metrics: slo_compliance, slo_state, slo_error_budget_remaining,
+# slo_burn_rate, slo_mwmb_firing
+go run ./cmd/reliability-agent slo \
+  --config examples/support-agent-slo-demo.yaml --emit-otlp
+
+# Track A metrics: telemetry_quality_score / _coverage / _findings
+go run ./cmd/reliability-agent audit-watch \
+  --profile examples/demo-agent.yaml --interval 5s --emit-otlp
+```
+
+`generate` creates `SLOs & Error Budgets [sre-sidekick]` with eight panels and
+six alert rules (fast/medium/slow burn per SLO), all enabled and evaluating.
+
+The three `telemetry_quality_*` panels are fed only by `audit-watch --emit-otlp`.
+Run `slo --emit-otlp` alone and those three panels stay empty on camera.
+
+**Ingestion lags about a minute.** Querying immediately after emitting returns
+zero series even though the samples are already in ClickHouse - the series has
+to be registered before the query path finds it. Emit, wait, then open the
+dashboard. This cost real debugging time; it is not a defect.
+
+For the incident shot, run the emitters while the service is failing so the
+panels show the SLI dropping, the burn rate climbing, and
+`slo_mwmb_firing` going to 1 - then the alert rules on the same page explain
+what would have paged.
