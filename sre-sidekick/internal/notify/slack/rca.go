@@ -46,7 +46,8 @@ type DiagnoseRequest struct {
 	Window string
 	// Alert names which alert triggered this diagnosis (e.g. "fast-burn"),
 	// for the reasoner's context. Empty for a human-triggered diagnosis.
-	Alert string
+	Alert    string
+	FiringAt time.Time
 }
 
 // FollowupRequest carries everything needed to answer one question in context.

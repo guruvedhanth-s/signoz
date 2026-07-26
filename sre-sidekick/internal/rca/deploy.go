@@ -14,7 +14,7 @@ import (
 func CorrelateDeploys(events []notify.DeployEvent, onset time.Time, window string) notify.DeployCorrelation {
 	duration, err := slo.WindowDuration(window)
 	if err != nil || duration <= 0 {
-		duration = time.Hour
+		return notify.DeployCorrelation{State: notify.DeployCorrelationUnknown, Reason: "invalid incident window"}
 	}
 	start := onset.Add(-2 * duration)
 	byKey := map[string]notify.DeployCandidate{}
@@ -34,8 +34,12 @@ func CorrelateDeploys(events []notify.DeployEvent, onset time.Time, window strin
 	for _, candidate := range byKey {
 		candidates = append(candidates, candidate)
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].At.Before(candidates[j].At) })
-	return notify.DeployCorrelation{Candidates: candidates, ExplicitNone: len(candidates) == 0}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].At.After(candidates[j].At) })
+	state := notify.DeployCorrelationFound
+	if len(candidates) == 0 {
+		state = notify.DeployCorrelationNone
+	}
+	return notify.DeployCorrelation{Candidates: candidates, State: state, ExplicitNone: len(candidates) == 0}
 }
 
 func DeployEventsFromEvidence(ev []notify.Evidence) []notify.DeployEvent {

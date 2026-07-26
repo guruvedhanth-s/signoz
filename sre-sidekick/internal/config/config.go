@@ -150,7 +150,6 @@ type SlackConfig struct {
 	SessionStorePath string              `yaml:"session_store_path" json:"session_store_path"`
 	AuditLogPath     string              `yaml:"audit_log_path" json:"audit_log_path"`
 	Authorization    AuthorizationConfig `yaml:"authorization" json:"authorization"`
-	EnableMutations  bool                `yaml:"enable_mutations" json:"enable_mutations"`
 }
 
 // AuthorizationConfig defines the Slack users and user groups allowed to
@@ -339,14 +338,21 @@ func (s SlackConfig) Validate() error {
 
 func validateAuthorization(a AuthorizationConfig) error {
 	seen := make(map[string]struct{})
-	for role, roster := range map[string]AuthorizationRoleConfig{
-		"approvers": a.Approvers,
-		"operators": a.Operators,
+	for _, entry := range []struct {
+		role   string
+		roster AuthorizationRoleConfig
+	}{
+		{role: "approvers", roster: a.Approvers},
+		{role: "operators", roster: a.Operators},
 	} {
+		role, roster := entry.role, entry.roster
 		for _, user := range roster.Users {
 			user = strings.TrimSpace(user)
 			if user == "" {
 				return fmt.Errorf("authorization.%s.users must not contain empty values", role)
+			}
+			if strings.HasPrefix(user, "@") {
+				return fmt.Errorf("authorization.%s.users must contain Slack user IDs, not handles", role)
 			}
 			key := role + ":user:" + user
 			if _, ok := seen[key]; ok {
@@ -355,7 +361,7 @@ func validateAuthorization(a AuthorizationConfig) error {
 			seen[key] = struct{}{}
 		}
 		for _, group := range roster.Groups {
-			group = strings.TrimSpace(strings.TrimPrefix(group, "@"))
+			group = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(group, "@")))
 			if group == "" {
 				return fmt.Errorf("authorization.%s.groups must not contain empty values", role)
 			}

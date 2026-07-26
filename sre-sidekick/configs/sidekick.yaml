@@ -41,7 +41,6 @@ notify:
     session_store_path: ""
     audit_log_path: ""
     # Mutation execution is opt-in and remains disabled by default.
-    enable_mutations: false
     # Optional click-time authorization. With no users/groups configured,
     # advisory MVP behavior remains permissive. Operators also count as
     # approvers. Group handles require the Slack usergroups:read scope.

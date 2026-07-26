@@ -30,6 +30,12 @@ type EvidenceSource interface {
 	Gather(ctx context.Context, inc Incident) ([]notify.Evidence, error)
 }
 
+// DeployEventSource is deliberately separate from error evidence: deployment
+// markers must be queried explicitly, never inferred from an error log.
+type DeployEventSource interface {
+	DeployEvents(ctx context.Context, inc Incident) ([]notify.DeployEvent, bool, error)
+}
+
 // MCPEvidenceSource gathers evidence for an incident by calling SigNoz MCP
 // tools directly - error traces, the top failing trace's spans, and
 // correlated error logs, plus an optional metric snapshot - and converts
@@ -109,6 +115,46 @@ func (s *MCPEvidenceSource) Gather(ctx context.Context, inc Incident) ([]notify.
 	return out, nil
 }
 
+func (s *MCPEvidenceSource) DeployEvents(ctx context.Context, inc Incident) ([]notify.DeployEvent, bool, error) {
+	if s.Client == nil {
+		return nil, false, fmt.Errorf("rca: MCPEvidenceSource has no MCP client")
+	}
+	start, end := windowMillis(s.now(), inc.Window)
+	result, err := s.Client.CallTool(ctx, "signoz_search_traces", map[string]any{
+		"service": inc.Service, "name": "deployment.marker", "start": start, "end": end, "limit": maxEvidenceItems,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	var payload spanQueryEnvelope
+	if err := result.Decode(&payload); err != nil {
+		return nil, false, err
+	}
+	var events []notify.DeployEvent
+	for _, result := range payload.Data.Data.Results {
+		for _, row := range result.Rows {
+			version := stringValue(row.Data, "service.version")
+			deployID := stringValue(row.Data, "deploy.id")
+			if version == "" && deployID == "" {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, row.Timestamp)
+			if err != nil {
+				continue
+			}
+			events = append(events, notify.DeployEvent{Version: version, DeployID: deployID, At: at})
+		}
+	}
+	return events, true, nil
+}
+
+func stringValue(record map[string]any, key string) string {
+	if value, ok := record[key].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
 // windowMillis converts an incident window (e.g. "1h") and an end time
 // into the [start, end] unix-millisecond bounds SigNoz MCP tools expect.
 // An unparsable window falls back to a 1-hour lookback rather than
@@ -149,9 +195,6 @@ func (e spanQueryEnvelope) records() []map[string]any {
 			if row.Data == nil {
 				continue
 			}
-			if row.Timestamp != "" {
-				row.Data["_timestamp"] = row.Timestamp
-			}
 			out = append(out, row.Data)
 		}
 	}
@@ -170,7 +213,7 @@ var traceFieldAllowlist = []string{
 // logFieldAllowlist names the log fields SanitizeFields is allowed to
 // surface in log evidence Notes.
 var logFieldAllowlist = []string{
-	"body", "severity_text", "trace_id", "span_id", "service.version", "deploy.id", "_timestamp",
+	"body", "severity_text", "trace_id", "span_id",
 }
 
 func (s *MCPEvidenceSource) gatherTraces(ctx context.Context, inc Incident, start, end int64) ([]notify.Evidence, string) {
@@ -331,14 +374,10 @@ func (s *MCPEvidenceSource) spanEvidence(kind notify.EvidenceKind, record map[st
 
 func (s *MCPEvidenceSource) logEvidence(record map[string]any, inc Incident) notify.Evidence {
 	fields := SanitizeFields(record, logFieldAllowlist)
-	timestamp, _ := time.Parse(time.RFC3339Nano, fields["_timestamp"])
 	return notify.Evidence{
-		Kind:          notify.EvidenceKindLog,
-		SignozLink:    s.recordLink(record, inc),
-		Note:          SanitizeNote(formatLogNote(fields)),
-		Timestamp:     timestamp,
-		DeployVersion: fields["service.version"],
-		DeployID:      fields["deploy.id"],
+		Kind:       notify.EvidenceKindLog,
+		SignozLink: s.recordLink(record, inc),
+		Note:       SanitizeNote(formatLogNote(fields)),
 	}
 }
 

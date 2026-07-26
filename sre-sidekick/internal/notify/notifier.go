@@ -54,12 +54,24 @@ type Grounding struct {
 	// telemetry for this window. When false, diagnosis must be
 	// StatusIndeterminate.
 	TelemetryTrusted bool               `json:"telemetryTrusted"`
+	EvaluatedStart   time.Time          `json:"evaluatedStart,omitempty"`
+	EvaluatedEnd     time.Time          `json:"evaluatedEnd,omitempty"`
 	RecentDeploy     *DeployCorrelation `json:"recentDeploy,omitempty"`
 }
 
+type DeployCorrelationState string
+
+const (
+	DeployCorrelationFound   DeployCorrelationState = "found"
+	DeployCorrelationNone    DeployCorrelationState = "none"
+	DeployCorrelationUnknown DeployCorrelationState = "unknown"
+)
+
 type DeployCorrelation struct {
-	Candidates   []DeployCandidate `json:"candidates,omitempty"`
-	ExplicitNone bool              `json:"explicitNone"`
+	Candidates   []DeployCandidate      `json:"candidates,omitempty"`
+	ExplicitNone bool                   `json:"explicitNone,omitempty"`
+	State        DeployCorrelationState `json:"state"`
+	Reason       string                 `json:"reason,omitempty"`
 }
 
 type DeployCandidate struct {
@@ -80,8 +92,11 @@ func (d *DeployCorrelation) Summary() string {
 		return ""
 	}
 	if len(d.Candidates) == 0 {
-		if d.ExplicitNone {
+		if d.ExplicitNone || d.State == DeployCorrelationNone {
 			return "No recent deploy in the incident window."
+		}
+		if d.State == DeployCorrelationUnknown {
+			return "Deploy correlation is unavailable: " + d.Reason + "."
 		}
 		return ""
 	}
@@ -94,9 +109,22 @@ func (d *DeployCorrelation) Summary() string {
 		if label == "" {
 			label = "unidentified version"
 		}
-		parts = append(parts, fmt.Sprintf("%s, %s before onset", label, candidate.Gap.Round(time.Second)))
+		parts = append(parts, fmt.Sprintf("%s, %s before onset", label, formatDuration(candidate.Gap)))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	if d < time.Hour {
+		return d.Round(time.Minute).String()
+	}
+	return d.Round(time.Hour).String()
 }
 
 // EvidenceKind identifies the signal type behind an Evidence entry.

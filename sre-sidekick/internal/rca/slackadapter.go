@@ -57,6 +57,13 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 	if window == "" {
 		window = a.window()
 	}
+	onset := req.FiringAt
+	if onset.IsZero() {
+		onset = grounding.EvaluatedStart
+	}
+	if onset.IsZero() {
+		onset = a.now()
+	}
 
 	incident := Incident{
 		CorrelationID:            fmt.Sprintf("slack-%s-%s-%d", req.Service, req.Environment, a.now().UnixNano()),
@@ -65,6 +72,7 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 		Window:                   window,
 		SLO:                      sloName,
 		Alert:                    req.Alert,
+		Onset:                    onset,
 		Grounding:                grounding,
 		DeployCorrelationEnabled: true,
 	}
