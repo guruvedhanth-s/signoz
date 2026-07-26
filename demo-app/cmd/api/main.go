@@ -74,11 +74,11 @@ func main() {
 	}
 
 	controller := faults.New()
-	controller.OnChange(func(mode faults.Mode, rate float64) {
-		if mode == faults.LogsMissingTraceID {
-			t.Logs.SetOmitTraceID(rate > 0)
-		}
-	})
+	// The emitter asks the controller per record rather than being told when the
+	// fault changes. That keeps one owner for the state - no race between the
+	// handler writing and requests reading, and the mode's rate is sampled per
+	// record like every other mode instead of collapsing to all-or-nothing.
+	t.Logs.OmitTraceID = func() bool { return controller.Active(faults.LogsMissingTraceID) }
 
 	// Business counters for the availability SLO. The engine's ratio SLI needs
 	// two distinct metric names (good and total), which cannot be derived from

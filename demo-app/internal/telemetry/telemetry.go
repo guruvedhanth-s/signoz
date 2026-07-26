@@ -23,8 +23,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -196,6 +199,9 @@ func (t *Telemetry) emitDeployMarker(ctx context.Context, cfg Config) {
 // does not hide the other.
 func (t *Telemetry) Shutdown(ctx context.Context) error {
 	var problems []string
+	// Logs first: draining the queue may still need the network, and there is
+	// no point flushing traces before discarding pending log records.
+	t.Logs.Close()
 	if err := t.tracerProvider.Shutdown(ctx); err != nil {
 		problems = append(problems, "traces: "+err.Error())
 	}
@@ -215,31 +221,98 @@ type LogEmitter struct {
 	service     string
 	environment string
 	client      *http.Client
-	// omitTraceID drops the trace correlation from emitted records. It exists
-	// only so the demo can *break* telemetry quality on purpose and give Track
+
+	// OmitTraceID decides, per record, whether to drop trace correlation. It
+	// exists so the demo can break telemetry quality on purpose and give Track
 	// A's required_field rule something real to catch.
-	omitTraceID bool
+	//
+	// A function rather than a bool, deliberately. An earlier version cached a
+	// bool here that the fault controller wrote and every request goroutine
+	// read, which was three bugs in one: an unsynchronized data race, a rate
+	// that collapsed to 100% because any nonzero rate set the flag, and two
+	// copies of the same state that could disagree. Asking the owner of the
+	// state per record fixes all three - the controller is already mutex-guarded
+	// and already samples the rate.
+	//
+	// Nil means never omit.
+	OmitTraceID func() bool
+
+	// emit is the async queue. Shipping a log record is an HTTP call, and doing
+	// it inline held the request open for up to the client timeout, inflating
+	// both the span duration and the latency the browser sees relative to the
+	// metric the SLO is computed from. Distorting the latency being measured is
+	// a poor property for a demo about measuring latency.
+	emit chan logJob
+	// dropped counts records discarded because the queue was full. Visible in
+	// the shutdown log rather than silent.
+	dropped atomic.Int64
+	wg      sync.WaitGroup
+	// closeOnce guards the channel close: Shutdown is deferred in each service's
+	// main, and a second call would otherwise panic on a closed channel.
+	closeOnce sync.Once
 }
+
+// logJob is a record already rendered, so the worker does no formatting and
+// holds no request state.
+type logJob struct {
+	payload []byte
+}
+
+const (
+	// logQueueDepth bounds memory when the collector is slow. Small on purpose:
+	// dropping demo logs is better than growing without limit.
+	logQueueDepth = 256
+	// logWorkers is how many records ship concurrently.
+	logWorkers = 4
+)
 
 func NewLogEmitter(cfg Config, host string, insecure bool) *LogEmitter {
 	scheme := "https"
 	if insecure {
 		scheme = "http"
 	}
-	return &LogEmitter{
+	emitter := &LogEmitter{
 		endpoint:    fmt.Sprintf("%s://%s/v1/logs", scheme, host),
 		service:     cfg.Service,
 		environment: cfg.Environment,
 		client:      &http.Client{Timeout: 5 * time.Second},
+		emit:        make(chan logJob, logQueueDepth),
+	}
+	for range logWorkers {
+		emitter.wg.Add(1)
+		go emitter.ship()
+	}
+	return emitter
+}
+
+// ship drains the queue. Each record gets its own bounded context: the request
+// that produced it is likely already finished, and its cancellation must not
+// discard the log describing it.
+func (e *LogEmitter) ship() {
+	defer e.wg.Done()
+	for job := range e.emit {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := e.post(ctx, job.payload); err != nil {
+			slog.Warn("ship log record", "error", err)
+		}
+		cancel()
 	}
 }
 
-// SetOmitTraceID toggles the "logs missing trace_id" telemetry-quality fault.
-func (e *LogEmitter) SetOmitTraceID(omit bool) {
-	e.omitTraceID = omit
+// Close drains the queue and stops the workers. Idempotent.
+func (e *LogEmitter) Close() {
+	e.closeOnce.Do(func() {
+		close(e.emit)
+		e.wg.Wait()
+		if dropped := e.dropped.Load(); dropped > 0 {
+			slog.Warn("log records dropped because the queue was full", "count", dropped)
+		}
+	})
 }
 
-// Emit writes one log record, correlated to the span in ctx when there is one.
+// Emit renders one log record, correlated to the span in ctx when there is one,
+// and queues it. It does not block on the network: the caller is usually in a
+// request path, and a slow collector must not become slow requests.
 func (e *LogEmitter) Emit(ctx context.Context, severity, body string, attrs map[string]string) error {
 	now := time.Now()
 	record := map[string]any{
@@ -256,7 +329,8 @@ func (e *LogEmitter) Emit(ctx context.Context, severity, body string, attrs map[
 	if len(attributes) > 0 {
 		record["attributes"] = attributes
 	}
-	if span := trace.SpanContextFromContext(ctx); span.IsValid() && !e.omitTraceID {
+	omit := e.OmitTraceID != nil && e.OmitTraceID()
+	if span := trace.SpanContextFromContext(ctx); span.IsValid() && !omit {
 		record["traceId"] = span.TraceID().String()
 		record["spanId"] = span.SpanID().String()
 	}
@@ -278,7 +352,20 @@ func (e *LogEmitter) Emit(ctx context.Context, severity, body string, attrs map[
 	if err != nil {
 		return fmt.Errorf("encode OTLP log: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint, bytes.NewReader(encoded))
+	select {
+	case e.emit <- logJob{payload: encoded}:
+		return nil
+	default:
+		// Full queue means the collector cannot keep up. Drop and count rather
+		// than block a request or grow without bound.
+		e.dropped.Add(1)
+		return nil
+	}
+}
+
+// post ships one rendered record.
+func (e *LogEmitter) post(ctx context.Context, payload []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create OTLP log request: %w", err)
 	}

@@ -59,16 +59,18 @@ func Valid(name string) bool {
 
 // Controller holds the live fault state. Safe for concurrent use: every
 // request reads it and the UI writes it.
+//
+// There is deliberately no change callback. An earlier version pushed
+// notifications to consumers so the log emitter could cache a flag, which
+// duplicated the state and introduced both a data race and a notification
+// ordering hazard - two Set calls could apply in one order and notify in
+// another, leaving the cached copy disagreeing with Snapshot. Consumers pull
+// from Active instead, so there is exactly one copy of the truth.
 type Controller struct {
 	mu    sync.RWMutex
 	rates map[Mode]float64
 	// rng is injectable so tests are deterministic.
 	rng func() float64
-
-	// onChange is notified after every mutation, so a service can react to a
-	// mode it must apply outside the request path - LogsMissingTraceID has to
-	// reach the log emitter, not the HTTP handler.
-	onChange func(Mode, float64)
 }
 
 func New() *Controller {
@@ -86,13 +88,6 @@ func (c *Controller) WithRandom(rng func() float64) *Controller {
 	return c
 }
 
-// OnChange registers a callback fired after each Set or Clear.
-func (c *Controller) OnChange(fn func(Mode, float64)) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.onChange = fn
-}
-
 // Set enables a mode at the given rate. A rate <= 0 disables it; a rate > 1 is
 // clamped. Returns the effective rate.
 func (c *Controller) Set(mode Mode, rate float64) float64 {
@@ -100,35 +95,20 @@ func (c *Controller) Set(mode Mode, rate float64) float64 {
 		rate = 1
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if rate <= 0 {
 		delete(c.rates, mode)
-		rate = 0
-	} else {
-		c.rates[mode] = rate
+		return 0
 	}
-	notify := c.onChange
-	c.mu.Unlock()
-	if notify != nil {
-		notify(mode, rate)
-	}
+	c.rates[mode] = rate
 	return rate
 }
 
 // Clear disables every mode.
 func (c *Controller) Clear() {
 	c.mu.Lock()
-	modes := make([]Mode, 0, len(c.rates))
-	for mode := range c.rates {
-		modes = append(modes, mode)
-	}
+	defer c.mu.Unlock()
 	c.rates = map[Mode]float64{}
-	notify := c.onChange
-	c.mu.Unlock()
-	if notify != nil {
-		for _, mode := range modes {
-			notify(mode, 0)
-		}
-	}
 }
 
 // Rate returns the configured rate for a mode, 0 when disabled.

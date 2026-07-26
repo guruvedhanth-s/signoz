@@ -63,17 +63,11 @@ func TestRateBoundaries(t *testing.T) {
 	}
 }
 
-func TestClearDisablesEverythingAndNotifies(t *testing.T) {
+func TestClearDisablesEveryMode(t *testing.T) {
 	controller := New()
-	var notified []Mode
-	controller.OnChange(func(mode Mode, rate float64) {
-		if rate == 0 {
-			notified = append(notified, mode)
-		}
-	})
-
 	controller.Set(PaymentsErrors, 0.5)
 	controller.Set(LogsMissingTraceID, 1)
+
 	controller.Clear()
 
 	for _, mode := range AllModes() {
@@ -81,12 +75,38 @@ func TestClearDisablesEverythingAndNotifies(t *testing.T) {
 			t.Errorf("%s still enabled after Clear", mode)
 		}
 	}
-	// The log-correlation fault is applied outside the request path, on the log
-	// emitter, so clearing it *must* notify or logs would silently stay broken
-	// after the UI says faults are off.
-	if len(notified) != 2 {
-		t.Errorf("Clear notified %v, want both previously-enabled modes", notified)
+}
+
+// The log-correlation fault is applied outside the request path, on the log
+// emitter. An earlier version pushed the state there via a callback, which the
+// emitter cached in a plain bool - a data race between the HTTP handler writing
+// and request goroutines reading, and a rate that collapsed to 100% because any
+// nonzero rate set the flag. Consumers now pull from Active per record, so this
+// test runs that access pattern under -race.
+func TestActiveIsSafeUnderConcurrentSetAndRead(t *testing.T) {
+	controller := New()
+	done := make(chan struct{})
+
+	// A reader standing in for the log emitter's OmitTraceID hook.
+	go func() {
+		defer close(done)
+		for range 2000 {
+			_ = controller.Active(LogsMissingTraceID)
+			_ = controller.Snapshot()
+		}
+	}()
+
+	// Writers standing in for UI slider changes.
+	for i := range 4 {
+		go func(i int) {
+			for range 500 {
+				controller.Set(LogsMissingTraceID, float64(i%2)*0.5)
+				controller.Clear()
+			}
+		}(i)
 	}
+
+	<-done
 }
 
 func TestSnapshotAlwaysReportsEveryMode(t *testing.T) {
