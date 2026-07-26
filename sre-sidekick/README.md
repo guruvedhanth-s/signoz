@@ -302,26 +302,18 @@ go run ./cmd/reliability-agent audit-watch \
 The webhook receives the same firing and resolved JSON documents printed by the
 watcher.
 
-### Slack Incoming Webhook delivery
+Slack communication is handled only by the RCA-driven `watch` command. Alerts
+must be delivered to its authenticated webhook listener; the RCA agent gathers
+evidence, produces the diagnosis, and the Slack coordinator posts the result.
+User follow-up messages are routed back through the same RCA adapter before a
+thread reply is sent. `audit-watch` does not send directly to Slack.
 
-A workspace that only granted an Incoming Webhook URL, with no bot token, can
-receive the same alerts as plain Slack messages:
-
-```bash
-export SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...'
-go run ./cmd/reliability-agent audit-watch \
-  --profile examples/demo-agent.yaml \
-  --slack-webhook-url "$SLACK_WEBHOOK_URL"
-```
-
-The Slack sink posts a `{"text": "..."}` payload, because Slack does not render
-the internal event JSON. Both flags can be set at once: `--webhook-url` keeps
-delivering the full SRE Sidekick event JSON to integrations that parse it.
-
-This sink is the fallback path. When a bot token is available, prefer the Track D
-Slack adapter under `internal/notify/slack`, configured through
-`configs/sidekick.yaml`: it renders Block Kit, threads each incident, and carries
-the approval actions that a plain Incoming Webhook cannot.
+A Slack URL passed to `--webhook-url`, or configured on a generated SigNoz
+notification channel, is rejected rather than delivered. There is deliberately
+no direct Slack sink: a raw Incoming Webhook cannot carry the Block Kit
+rendering, the incident thread, or the approval actions that the Track D adapter
+provides, so a diagnosis delivered that way would be strictly worse than one
+that went through the pipeline.
 
 ## Run an SLO evaluation
 

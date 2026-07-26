@@ -24,9 +24,12 @@ type fakeRCA struct {
 	answerErr   error
 	diagnosis   notify.Diagnosis
 	diagnoseErr error
+	verify      VerifyResult
+	verifyErr   error
 
 	requests  []FollowupRequest
 	diagnosed []DiagnoseRequest
+	verified  []VerifyRequest
 
 	// block, when set, holds Diagnose until it is closed, so concurrency
 	// limits can be exercised.
@@ -50,6 +53,13 @@ func (f *fakeRCA) AnswerFollowup(_ context.Context, req FollowupRequest) (string
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
 	return f.answer, f.answerErr
+}
+
+func (f *fakeRCA) Verify(_ context.Context, req VerifyRequest) (VerifyResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verified = append(f.verified, req)
+	return f.verify, f.verifyErr
 }
 
 func (f *fakeRCA) lastRequest(t *testing.T) FollowupRequest {
@@ -981,30 +991,11 @@ func TestActuatorFailureDoesNotUndoTheDecision(t *testing.T) {
 	}
 }
 
-// fakeVerifier stands in for the deterministic SLO re-evaluation engine.
-type fakeVerifier struct {
-	result VerifyResult
-	err    error
-
-	mu       sync.Mutex
-	requests []VerifyRequest
-}
-
-func (f *fakeVerifier) Verify(_ context.Context, req VerifyRequest) (VerifyResult, error) {
-	f.mu.Lock()
-	f.requests = append(f.requests, req)
-	f.mu.Unlock()
-	if f.err != nil {
-		return VerifyResult{}, f.err
-	}
-	return f.result, nil
-}
-
 // An approval must offer a way to check recovery, and clicking it must
 // re-evaluate the SLO the incident was grounded on - not some other one.
 func TestApproveThenVerify_ChecksTheGroundedSLO(t *testing.T) {
-	verifier := &fakeVerifier{result: VerifyResult{SLOState: "healthy", BurnRate: 0.4, ErrorBudgetRemaining: 0.8, TelemetryTrusted: true, Recovered: true}}
-	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	rca := &fakeRCA{verify: VerifyResult{SLOState: "healthy", BurnRate: 0.4, ErrorBudgetRemaining: 0.8, TelemetryTrusted: true, Recovered: true}}
+	f := newFixture(t, rca)
 	opened := announceFixture(t, f)
 
 	f.coordinator.OnInteraction(context.Background(), Interaction{
@@ -1016,12 +1007,12 @@ func TestApproveThenVerify_ChecksTheGroundedSLO(t *testing.T) {
 		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U1",
 	})
 
-	verifier.mu.Lock()
-	defer verifier.mu.Unlock()
-	if len(verifier.requests) != 1 {
-		t.Fatalf("verify calls = %d, want 1", len(verifier.requests))
+	rca.mu.Lock()
+	defer rca.mu.Unlock()
+	if len(rca.verified) != 1 {
+		t.Fatalf("verify calls = %d, want 1", len(rca.verified))
 	}
-	req := verifier.requests[0]
+	req := rca.verified[0]
 	if req.Service != "support-agent" || req.Environment != "prod" || req.SLO != "agent-success-rate" {
 		t.Errorf("VerifyRequest = %+v, want it scoped to the diagnosis's own service/environment/SLO", req)
 	}
@@ -1035,8 +1026,8 @@ func TestApproveThenVerify_ChecksTheGroundedSLO(t *testing.T) {
 // must not appear, and clicking a stale verify action id must not crash if
 // it somehow arrives anyway.
 func TestDecline_DoesNotOfferVerify(t *testing.T) {
-	verifier := &fakeVerifier{}
-	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	rca := &fakeRCA{}
+	f := newFixture(t, rca)
 	opened := announceFixture(t, f)
 
 	f.coordinator.OnInteraction(context.Background(), Interaction{
@@ -1055,9 +1046,9 @@ func TestDecline_DoesNotOfferVerify(t *testing.T) {
 		t.Error("a declined incident's retired message still offers a Verify button")
 	}
 
-	verifier.mu.Lock()
-	defer verifier.mu.Unlock()
-	if len(verifier.requests) != 0 {
+	rca.mu.Lock()
+	defer rca.mu.Unlock()
+	if len(rca.verified) != 0 {
 		t.Error("declining triggered a verify call")
 	}
 }
@@ -1065,8 +1056,8 @@ func TestDecline_DoesNotOfferVerify(t *testing.T) {
 // Verify can be clicked more than once while a human waits for a fix to
 // take effect, and it must never touch the recorded decision.
 func TestVerify_CanBeCheckedMultipleTimesWithoutAffectingTheDecision(t *testing.T) {
-	verifier := &fakeVerifier{result: VerifyResult{SLOState: "unhealthy", BurnRate: 3.0, TelemetryTrusted: true, Recovered: false}}
-	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	rca := &fakeRCA{verify: VerifyResult{SLOState: "unhealthy", BurnRate: 3.0, TelemetryTrusted: true, Recovered: false}}
+	f := newFixture(t, rca)
 	opened := announceFixture(t, f)
 
 	f.coordinator.OnInteraction(context.Background(), Interaction{
@@ -1080,9 +1071,9 @@ func TestVerify_CanBeCheckedMultipleTimesWithoutAffectingTheDecision(t *testing.
 		})
 	}
 
-	verifier.mu.Lock()
-	calls := len(verifier.requests)
-	verifier.mu.Unlock()
+	rca.mu.Lock()
+	calls := len(rca.verified)
+	rca.mu.Unlock()
 	if calls != 3 {
 		t.Errorf("verify calls = %d, want 3 - each click should re-check", calls)
 	}
@@ -1095,7 +1086,7 @@ func TestVerify_CanBeCheckedMultipleTimesWithoutAffectingTheDecision(t *testing.
 }
 
 func TestVerify_WithoutAVerifierRefusesCleanly(t *testing.T) {
-	f := newFixture(t, &fakeRCA{}) // no WithCoordinatorVerifier: defaults to UnavailableVerifier
+	f := newFixture(t, &fakeRCA{verifyErr: ErrVerifierUnavailable})
 	opened := announceFixture(t, f)
 
 	f.coordinator.OnInteraction(context.Background(), Interaction{
@@ -1113,8 +1104,8 @@ func TestVerify_WithoutAVerifierRefusesCleanly(t *testing.T) {
 }
 
 func TestVerify_UntrustedTelemetryIsReportedAsIndeterminate(t *testing.T) {
-	verifier := &fakeVerifier{result: VerifyResult{SLOState: "indeterminate", TelemetryTrusted: false}}
-	f := newFixture(t, &fakeRCA{}, WithCoordinatorVerifier(verifier))
+	rca := &fakeRCA{verify: VerifyResult{SLOState: "indeterminate", TelemetryTrusted: false}}
+	f := newFixture(t, rca)
 	opened := announceFixture(t, f)
 
 	f.coordinator.OnInteraction(context.Background(), Interaction{

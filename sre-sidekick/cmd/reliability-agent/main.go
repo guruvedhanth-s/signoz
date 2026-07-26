@@ -72,7 +72,6 @@ func runAuditWatch(args []string) error {
 	alertSeverity := fs.String("alert-severity", "blocker", "minimum failed finding severity that opens an alert")
 	failuresBeforeAlert := fs.Int("failures-before-alert", 2, "consecutive alertable failures required")
 	webhookURL := fs.String("webhook-url", "", "optional alert webhook URL")
-	slackWebhookURL := fs.String("slack-webhook-url", os.Getenv("SLACK_WEBHOOK_URL"), "optional Slack Incoming Webhook URL")
 	emitOTLP := fs.Bool("emit-otlp", false, "emit telemetry audit metrics over OTLP")
 	otlpEndpoint := fs.String("otlp-endpoint", envOr("OTLP_ENDPOINT", "localhost:4318"), "OTLP metrics endpoint")
 	if err := fs.Parse(args); err != nil {
@@ -107,9 +106,6 @@ func runAuditWatch(args []string) error {
 	sinks := alerting.MultiSink{&alerting.JSONSink{Writer: os.Stdout}}
 	if *webhookURL != "" {
 		sinks = append(sinks, alerting.WebhookSink{URL: *webhookURL})
-	}
-	if *slackWebhookURL != "" {
-		sinks = append(sinks, alerting.SlackSink{URL: *slackWebhookURL})
 	}
 
 	runner := &monitor.Runner{
@@ -504,7 +500,7 @@ func runGenerate(args []string) error {
 	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
 	channelName := fs.String("channel", slo.DefaultChannelName, "SigNoz notification channel name")
-	webhookURL := fs.String("webhook-url", os.Getenv("ALERT_WEBHOOK_URL"), "webhook URL for generated SigNoz notification channel")
+	webhookURL := fs.String("webhook-url", envOr("SIDEKICK_WEBHOOK_URL", os.Getenv("ALERT_WEBHOOK_URL")), "RCA webhook listener URL for the generated SigNoz notification channel; Slack URLs are rejected")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

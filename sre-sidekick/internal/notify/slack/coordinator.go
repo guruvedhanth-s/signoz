@@ -31,7 +31,6 @@ type Coordinator struct {
 	client   *Client
 	sessions *session.Manager
 	rca      RCA
-	verifier Verifier
 	actuator Actuator
 	logger   *slog.Logger
 	metrics  *Metrics
@@ -66,17 +65,6 @@ func WithCoordinatorLogger(logger *slog.Logger) CoordinatorOption {
 // OpenTelemetry, so the loop appears on a SigNoz dashboard (PRD section 17).
 func WithCoordinatorMetrics(metrics *Metrics) CoordinatorOption {
 	return func(c *Coordinator) { c.metrics = metrics }
-}
-
-// WithCoordinatorVerifier attaches the deterministic verify engine (PRD
-// section 16). Until attached, ActionVerify clicks refuse rather than
-// reporting a fabricated recovery state (UnavailableVerifier).
-func WithCoordinatorVerifier(verifier Verifier) CoordinatorOption {
-	return func(c *Coordinator) {
-		if verifier != nil {
-			c.verifier = verifier
-		}
-	}
 }
 
 // WithCoordinatorActuator attaches the Act-stage adapter (PRD sections 15,
@@ -131,7 +119,6 @@ func NewCoordinator(
 		client:             client,
 		sessions:           sessions,
 		rca:                rca,
-		verifier:           UnavailableVerifier{},
 		actuator:           NoopActuator{},
 		logger:             slog.Default(),
 		defaultEnvironment: "prod",
@@ -306,7 +293,7 @@ func (c *Coordinator) verify(ctx context.Context, s *session.Session, in Interac
 		return
 	}
 
-	result, err := c.verifier.Verify(ctx, VerifyRequest{
+	result, err := c.rca.Verify(ctx, VerifyRequest{
 		Service:     s.Service,
 		Environment: s.Environment,
 		SLO:         d.Grounding.SLO,

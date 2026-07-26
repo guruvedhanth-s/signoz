@@ -3,6 +3,8 @@ package signoz
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 func (c *Client) GenerateDashboard(ctx context.Context, data map[string]any) (string, bool, error) {
@@ -55,9 +57,21 @@ func (c *Client) EnsureChannel(ctx context.Context, name string, webhookURL ...s
 	if len(webhookURL) == 0 || webhookURL[0] == "" {
 		return fmt.Errorf("webhook URL is required to create SigNoz channel %q", name)
 	}
+	if isSlackWebhookURL(webhookURL[0]) {
+		return fmt.Errorf("SigNoz notification channels must target the RCA webhook listener, not Slack")
+	}
 	return c.postJSON(ctx, "/api/v1/channels", map[string]any{
 		"name": name, "webhook_configs": []any{map[string]any{"url": webhookURL[0], "send_resolved": true}},
 	}, nil)
+}
+
+func isSlackWebhookURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return host == "slack.com" || strings.HasSuffix(host, ".slack.com")
 }
 
 // GenerateBurnRateAlert creates the named alert rule if it does not exist,

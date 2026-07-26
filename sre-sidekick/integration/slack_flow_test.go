@@ -198,6 +198,10 @@ func (s *stubRCA) AnswerFollowup(
 	return s.answer, nil
 }
 
+func (s *stubRCA) Verify(context.Context, sidekickslack.VerifyRequest) (sidekickslack.VerifyResult, error) {
+	return sidekickslack.VerifyResult{SLOState: "healthy", TelemetryTrusted: true, Recovered: true}, nil
+}
+
 func (s *stubRCA) lastRequest(t *testing.T) sidekickslack.FollowupRequest {
 	t.Helper()
 	s.mu.Lock()

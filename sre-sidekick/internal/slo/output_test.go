@@ -14,4 +14,14 @@ func TestBuildDashboardAndBurnRuleAreStable(t *testing.T) {
 	if rule["alert"] != "SLO fast burn - checkout" || !strings.Contains(rule["description"].(string), "14.4") {
 		t.Fatalf("unexpected burn rule: %#v", rule)
 	}
+	condition := rule["condition"].(map[string]any)
+	composite := condition["compositeQuery"].(map[string]any)
+	queries := composite["queries"].([]any)
+	query := queries[0].(map[string]any)
+	spec := query["spec"].(map[string]any)
+	aggregations := spec["aggregations"].([]any)
+	aggregation := aggregations[0].(map[string]any)
+	if aggregation["metricName"] != "slo_mwmb_firing" {
+		t.Fatalf("burn rule must consume emitted multi-window firing metric: %#v", aggregations)
+	}
 }

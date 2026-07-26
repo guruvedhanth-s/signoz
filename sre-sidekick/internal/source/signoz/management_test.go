@@ -49,6 +49,14 @@ func TestManagementOperationsAreIdempotentAndScoped(t *testing.T) {
 	}
 }
 
+func TestEnsureChannelRejectsDirectSlackWebhook(t *testing.T) {
+	client := NewClient("http://sig-noz.invalid", "key")
+	err := client.EnsureChannel(context.Background(), "alerts", "https://hooks.slack.com/services/T000/B000/secret")
+	if err == nil {
+		t.Fatal("direct Slack notification channel was accepted")
+	}
+}
+
 // A re-run after a tier's burn-rate threshold changes must actually update
 // the existing rule, not silently leave the stale one in place - mirrors
 // GenerateDashboard's own find-then-PUT-or-POST pattern.
