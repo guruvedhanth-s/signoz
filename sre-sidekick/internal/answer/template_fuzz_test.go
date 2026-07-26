@@ -3,9 +3,9 @@ package answer
 import "testing"
 
 func FuzzTemplateSelfConsistency(f *testing.F) {
-	f.Add("unhealthy", "1h", "svc", "env", "caveat.", "reason", "lbl", "0.5")
-	f.Fuzz(func(t *testing.T, headline, window, svc, env, caveat, reason, label, value string) {
-		facts := Facts{Headline: headline, Window: window, Service: svc, Environment: env,
+	f.Add("unhealthy", "1h", "2026-07-26 11:00-12:00 UTC", "svc", "env", "caveat.", "reason", "lbl", "0.5")
+	f.Fuzz(func(t *testing.T, headline, window, evaluatedRange, svc, env, caveat, reason, label, value string) {
+		facts := Facts{Headline: headline, Window: window, EvaluatedRange: evaluatedRange, Service: svc, Environment: env,
 			Caveat: caveat, Reason: reason, Values: []Fact{{Label: label, Value: value}}}
 		if len(nonASCIINumerals(RenderTemplate(facts))) > 0 {
 			t.Skip("verifier rejects non-ASCII numerals by design")

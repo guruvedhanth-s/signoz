@@ -272,18 +272,19 @@ func TestBackendWarningTextNeverReachesThePrompt(t *testing.T) {
 func TestVerifyNumbersAcceptsRestyledSupplied(t *testing.T) {
 	facts := FactsFrom(statusEnvelope())
 	cases := map[string]bool{
-		"burn 11.2x over 1h":            true,  // exact
-		"burn 11.20x over 1h":           true,  // trailing zero
-		"SLI 44.0%":                     true,  // exact
-		"evaluated 2026-07-26 11:00":    false, // clock digits are not quotable facts
-		"budget is 5% left":             false, // never computed
-		"3 SLOs are unhealthy":          false, // count not supplied as 3
-		"burn 11.3x":                    false, // near-miss is still invented
-		"the service is unhealthy":      true,  // no numbers at all
-		"burn rate -11.2x":              false, // sign flip changes the claim
-		"1 SLO evaluated over 1h at 44": true,  // 1 and 44 both supplied
-		"SLI is ９９.９%":                  false, // non-ASCII digits are rejected
-		"1,000 requests failed":         false, // comma groups stay one numeric claim
+		"burn 11.2x over 1h":                   true,  // exact
+		"burn 11.20x over 1h":                  true,  // trailing zero
+		"SLI 44.0%":                            true,  // exact
+		"evaluated 2026-07-26 11:00":           false, // partial clock digits are not quotable facts
+		"evaluated 2026-07-26 11:00-12:00 UTC": true,  // exact range is opaque provenance
+		"budget is 5% left":                    false, // never computed
+		"3 SLOs are unhealthy":                 false, // count not supplied as 3
+		"burn 11.3x":                           false, // near-miss is still invented
+		"the service is unhealthy":             true,  // no numbers at all
+		"burn rate -11.2x":                     false, // sign flip changes the claim
+		"1 SLO evaluated over 1h at 44":        true,  // 1 and 44 both supplied
+		"SLI is ９９.９%":                         false, // non-ASCII digits are rejected
+		"1,000 requests failed":                false, // comma groups stay one numeric claim
 	}
 	for candidate, wantOK := range cases {
 		err := VerifyNumbers(candidate, facts)

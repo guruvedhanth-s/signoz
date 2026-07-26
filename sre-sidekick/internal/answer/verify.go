@@ -31,6 +31,7 @@ import (
 // numbers are harmless is exactly the judgement this design refuses to
 // make.
 func VerifyNumbers(candidate string, facts Facts) error {
+	candidate = withoutOpaqueProvenance(candidate, facts)
 	if bad := nonASCIINumerals(candidate); len(bad) > 0 {
 		sort.Strings(bad)
 		return fmt.Errorf("answer contains unsupported non-ASCII numeral(s): %s", strings.Join(bad, ", "))
@@ -146,6 +147,13 @@ func normalizeNumber(token string) string {
 }
 
 func isDigit(r rune) bool { return r >= '0' && r <= '9' }
+
+func withoutOpaqueProvenance(candidate string, facts Facts) string {
+	if facts.EvaluatedRange == "" {
+		return candidate
+	}
+	return strings.ReplaceAll(candidate, facts.EvaluatedRange, "")
+}
 
 func nonASCIINumerals(text string) []string {
 	seen := map[string]struct{}{}
