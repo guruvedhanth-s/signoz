@@ -27,6 +27,15 @@ func TestTelemetrySourceCollectsTraceAndMetricSignals(t *testing.T) {
 			t.Fatal(err)
 		}
 		signal := request.CompositeQuery.Queries[0].Spec.Signal
+		// The two signals have genuinely different response shapes, and the
+		// stub has to reflect that: metrics come back as labelled time
+		// series, not as rows. Serving rows for metrics is what let the
+		// invalid metrics query go unnoticed here in the first place.
+		if signal == "metrics" {
+			_ = json.NewEncoder(w).Encode(metricsSeriesResponse(
+				map[string]string{"service.name": "checkout"}, time.Now(), 1))
+			return
+		}
 		data := map[string]any{"service.name": "checkout", "name": signal + ".span", "value": 1}
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"data": map[string]any{"results": []any{map[string]any{"rows": []any{map[string]any{"timestamp": time.Now(), "data": data}}}}}}})
 	}))

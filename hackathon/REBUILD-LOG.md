@@ -186,11 +186,7 @@ incomplete query as insufficient evidence, so **every** diagnosis returned
 Fix: `evidenceProfile` now requests traces and logs only, the signals the gate
 actually judges.
 
-Still outstanding: the metrics query itself is still wrong for any caller that
-does want metrics.
-`examples/checkout-api.yaml` declares a metrics signal, so a Track A audit of
-that profile still fails its metrics query.
-Not on the demo path, so it is recorded here rather than fixed under deadline.
+This was fixed afterwards; see "The metrics signal, fixed properly" below.
 
 ### Bug 2: the traces query used an order key that does not exist
 
@@ -317,3 +313,90 @@ Close session buttons, and a correlation-ID footer.
   They read 3.64x shortly after the switch and 8.6x a few minutes later.
   Restart the demo-agent healthy, let it settle, then switch to buggy a known
   number of minutes before recording if a specific number is wanted on screen.
+
+## The metrics signal, fixed properly
+
+The first pass only stopped the RCA evidence gate from *asking* for metrics.
+Any profile that genuinely wants them - `examples/checkout-api.yaml` declares a
+counter and a histogram, plus a freshness rule and a cardinality rule - was
+still broken.
+Fixing it turned up three distinct problems, each found by querying real SigNoz.
+
+### 1. Metrics need a different request entirely
+
+`querySignal` builds a `requestType: "raw"` row scan with an
+`{"expression": "count()"}` aggregation.
+A metrics query aggregates a *named series*, so v5 wants
+`requestType: "time_series"` and a `MetricAggregation` carrying `metricName`,
+`timeAggregation`, and `spaceAggregation`.
+There is also no way to ask for "every metric this service emits" in one query,
+so the source now issues one query per metric the profile names.
+
+Aggregations are chosen by declared type, because SigNoz rejects `sum` as a
+time aggregation on a monotonic counter ("valid values: rate, increase"):
+counters and histogram counts use `rate`/`sum`, anything else `avg`/`avg`.
+
+### 2. A histogram's base name holds nothing
+
+`signoz_latency` returns zero series; `signoz_latency.count` returns data.
+Histograms are stored as `.bucket` / `.count` / `.sum` children, so the query
+reads the `.count` child while `LastSeen` stays keyed by the *declared* name -
+the freshness rule knows nothing about child series and must still find its
+entry.
+
+### 3. Label spellings differ per metric family, and a wrong one is fatal
+
+An OTel-SDK counter resolves under `resource.service.name`.
+`signoz_latency`, derived by the spanmetrics processor, carries the bare
+`service.name` / `deployment.environment` keys.
+Sending a key a metric does not have is **not** an empty result - SigNoz
+rejects the query with "Found 2 errors while parsing the search expression".
+
+This is the same problem `examples/support-agent-slo.yaml` solves with its
+`service_label` / `environment_label` settings.
+The source now tries the known spellings in order - `resource.*`, then bare
+semantic-convention, then underscored custom - and keeps the first that both
+parses and returns data.
+It never falls back to an unfiltered query, so results are always scoped to the
+requested service.
+
+### A hole found while fixing it
+
+`profileUsesSignal` treats a rule with `signal: metrics` as reason enough to
+query metrics, but the first implementation iterated only the declared
+`signals.metrics.fields`.
+A profile naming a metric solely in a rule would have queried nothing at all,
+leaving that rule permanently reporting "no last-seen timestamp".
+Metric names now come from the declared fields *and* from freshness and
+required_field rules.
+Cardinality rule fields are deliberately excluded: those name a label on some
+metric, not a metric.
+
+### Proven live
+
+A `checkout-api`-shaped profile pointed at metrics that exist in this
+environment:
+
+```
+request-freshness    pass   metrics   last activity was 1m49s ago
+request-cardinality  pass   metrics   environment has 1 distinct values
+```
+
+An absent metric is also correct now: SigNoz answers success with zero series,
+so it gets no `LastSeen` entry and the freshness rule reports "no last-seen
+timestamp" on its own terms, instead of one missing metric vetoing a whole
+audit through `QueryComplete`.
+
+### Two unrelated problems that audit surfaced
+
+Neither is caused by this change, and neither is on the demo path.
+
+1. **A traces rule fails on the field name.** `required-service-name` reported
+   "200 of 200 records lack service.name" against live trace rows. The
+   attribute is presumably nested or spelled differently in the raw trace
+   response than the profile expects.
+2. **The traces query fills its row limit**, so the snapshot is `Partial`,
+   `Complete()` is false, and the audit's overall status is `indeterminate`
+   even though both metrics rules passed. Correct by the current rules, but it
+   means any busy service audits as indeterminate. Worth revisiting: a capped
+   sample that already found a definite failure is arguably not indeterminate.
