@@ -201,3 +201,24 @@ func TestSourceEvidenceGate_NoSource(t *testing.T) {
 		t.Fatal("expected an error when no telemetry source is configured")
 	}
 }
+
+// evaluateSnapshot judges sufficiency on logs, error spans, and exceptions; it
+// never reads snapshot.Metrics. Asking the source for metrics anyway is not
+// free: a signal whose query fails clears Snapshot.QueryComplete, and this gate
+// treats an incomplete query as insufficient evidence. Against a live SigNoz
+// the metrics query is rejected outright (the v5 API wants a metric
+// aggregation, not the raw count() this source sends), so requesting it made
+// every diagnosis indeterminate. Only ask for what the gate judges.
+func TestEvidenceProfileRequestsOnlyTheSignalsTheGateJudges(t *testing.T) {
+	p := evidenceProfile("checkout", "prod")
+
+	if len(p.Spec.Signals.Metrics.Fields) != 0 || p.Spec.Signals.Metrics.RootSpan != "" {
+		t.Errorf("evidence profile must not request metrics, which the gate never reads: %+v", p.Spec.Signals.Metrics)
+	}
+	if p.Spec.Signals.Traces.RootSpan == "" {
+		t.Error("evidence profile must request traces: error spans and exceptions are read from them")
+	}
+	if len(p.Spec.Signals.Logs.Fields) == 0 {
+		t.Error("evidence profile must request logs: the gate reads them for sufficiency")
+	}
+}

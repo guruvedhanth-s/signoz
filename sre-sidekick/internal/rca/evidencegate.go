@@ -109,21 +109,30 @@ func (g *SourceEvidenceGate) CheckWithSnapshot(ctx context.Context, inc Incident
 }
 
 // evidenceProfile builds a synthetic profile.Profile that asks a
-// TelemetrySource for every signal (traces, metrics, logs). The RCA agent
+// TelemetrySource for the signals this gate actually judges. The RCA agent
 // does not operate against a declared Track A audit profile the way
 // audit-watch does - it just needs whatever telemetry exists for the
 // incident's service/environment - so it synthesizes a profile whose
-// Signals are all non-empty, which is the only thing TelemetrySource
+// Signals are non-empty, which is the only thing TelemetrySource
 // implementations (see signoz.TelemetrySource.profileUsesSignal) use to
 // decide which signals to query.
+//
+// Traces and logs only, deliberately. evaluateSnapshot judges sufficiency
+// on logs, error spans, and exceptions; it never reads snapshot.Metrics.
+// Asking for a signal the gate does not judge is not free: any signal whose
+// query fails clears Snapshot.QueryComplete, and this gate treats an
+// incomplete query as insufficient evidence. Requesting metrics therefore
+// let an unrelated metrics-query failure veto every diagnosis, which is
+// exactly what happened against a live SigNoz - the v5 API rejects the raw
+// count() aggregation this source sends for the metrics signal, so the
+// query failed every time and the gate returned indeterminate forever.
 func evidenceProfile(service, environment string) profile.Profile {
 	return profile.Profile{
 		Metadata: profile.Metadata{Service: service, Environment: environment},
 		Spec: profile.Spec{
 			Signals: profile.Signals{
-				Traces:  profile.SignalSpec{RootSpan: "root"},
-				Logs:    profile.SignalSpec{Fields: []profile.FieldSpec{{Path: "body"}}},
-				Metrics: profile.SignalSpec{Fields: []profile.FieldSpec{{Path: "value"}}},
+				Traces: profile.SignalSpec{RootSpan: "root"},
+				Logs:   profile.SignalSpec{Fields: []profile.FieldSpec{{Path: "body"}}},
 			},
 		},
 	}

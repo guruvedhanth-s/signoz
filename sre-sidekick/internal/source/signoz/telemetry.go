@@ -72,6 +72,17 @@ func (s *TelemetrySource) querySignal(ctx context.Context, signal string, target
 	if target.Environment != "" {
 		filter += fmt.Sprintf(" AND resource.deployment.environment = '%s'", escapeFilter(target.Environment))
 	}
+	// Newest first, with "id" as a tiebreaker so records sharing a
+	// timestamp come back in a stable order. "id" exists on the logs
+	// signal only: SigNoz's v5 API rejects the whole query with
+	// "field `id` not found" when it is sent for traces, which used to
+	// fail the traces query on every call and, through
+	// Snapshot.QueryComplete, made the RCA evidence gate return
+	// indeterminate for every incident. Confirmed live against SigNoz.
+	order := []any{map[string]any{"key": map[string]any{"name": "timestamp"}, "direction": "desc"}}
+	if signal == "logs" {
+		order = append(order, map[string]any{"key": map[string]any{"name": "id"}, "direction": "desc"})
+	}
 	request := map[string]any{
 		"schemaVersion": "v1", "start": target.Start.UnixMilli(), "end": target.End.UnixMilli(),
 		"requestType": "raw", "noCache": true,
@@ -79,11 +90,8 @@ func (s *TelemetrySource) querySignal(ctx context.Context, signal string, target
 			"type": "builder_query",
 			"spec": map[string]any{
 				"name": "A", "signal": signal, "disabled": false, "limit": s.Limit, "offset": 0,
-				"filter": map[string]any{"expression": filter},
-				"order": []any{
-					map[string]any{"key": map[string]any{"name": "timestamp"}, "direction": "desc"},
-					map[string]any{"key": map[string]any{"name": "id"}, "direction": "desc"},
-				},
+				"filter":       map[string]any{"expression": filter},
+				"order":        order,
 				"aggregations": []any{map[string]any{"expression": "count()"}},
 			},
 		}}},
@@ -144,9 +152,12 @@ func normalizeSignal(response rawLogsResponse, signal string, limit int) evidenc
 			}
 		}
 	}
+	// See the same guard in logs.go: a capped sample is Partial, not an
+	// incomplete query. Snapshot.Complete() still reports false, so Track A
+	// is unaffected; the RCA evidence gate can now tell "we only saw the
+	// first N records" apart from "the query did not run".
 	if limit > 0 && rows >= limit {
 		snapshot.Partial = true
-		snapshot.QueryComplete = false
 	}
 	for key, values := range distinct {
 		snapshot.DistinctValues[key] = len(values)
