@@ -57,7 +57,35 @@ type Config struct {
 	// shapes are kept identical so the conversion is a plain type
 	// conversion, not a field-by-field copy.
 	Presentation PresentationConfig `yaml:"presentation" json:"presentation"`
+	// Services registers the services the conversational copilot may be
+	// asked about, each bound to the telemetry profile it is audited
+	// against and the SLO config its state is computed from.
+	//
+	// The list is explicit rather than discovered by scanning a directory:
+	// a service the sidekick will quote reliability numbers for is worth
+	// naming once, and a stray YAML file in a config directory should not
+	// be able to add one silently.
+	Services []ServiceBinding `yaml:"services" json:"services,omitempty"`
 }
+
+// ServiceBinding ties one service/environment to the files describing it.
+type ServiceBinding struct {
+	Service     string `yaml:"service" json:"service"`
+	Environment string `yaml:"environment" json:"environment"`
+	// Profile is the telemetry profile YAML used by the Track A audit that
+	// answers "can I trust this data". Optional: without it, the service
+	// can still report SLO state, but telemetry_trust says no profile is
+	// registered rather than failing vaguely.
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// SLOConfig is the SLO YAML defining the objectives, error budget and
+	// burn rate. Optional: without it, the service appears in the
+	// inventory but has no SLO to report on.
+	SLOConfig string `yaml:"slo_config,omitempty" json:"slo_config,omitempty"`
+}
+
+// Key is the service|environment key used by the registry and the SLO
+// config source.
+func (s ServiceBinding) Key() string { return s.Service + "|" + s.Environment }
 
 type StorageConfig struct {
 	Driver string `yaml:"driver" json:"driver"`
@@ -151,6 +179,15 @@ type SlackConfig struct {
 	AuditLogPath     string              `yaml:"audit_log_path" json:"audit_log_path"`
 	Authorization    AuthorizationConfig `yaml:"authorization" json:"authorization"`
 	EnableMutations  bool                `yaml:"enable_mutations" json:"enable_mutations"`
+	// ChannelServices maps a Slack channel id (e.g. "C01ABC123") to the
+	// service a question asked in that channel is about, so "@sidekick how
+	// are we doing?" in an incident channel needs no service named.
+	//
+	// Channel ids rather than names, and static configuration rather than a
+	// conversations.list lookup: the id is stable across renames, and the
+	// static form needs neither the channels:read scope nor an app
+	// reinstall to grant it.
+	ChannelServices map[string]ChannelScope `yaml:"channel_services,omitempty" json:"channel_services,omitempty"`
 }
 
 // AuthorizationConfig defines the Slack users and user groups allowed to
@@ -165,6 +202,14 @@ type AuthorizationConfig struct {
 type AuthorizationRoleConfig struct {
 	Users  []string `yaml:"users" json:"users"`
 	Groups []string `yaml:"groups" json:"groups"`
+}
+
+// ChannelScope is the default service and environment for questions asked
+// in one Slack channel.
+type ChannelScope struct {
+	Service string `yaml:"service" json:"service"`
+	// Environment is optional; empty falls back to DefaultEnvironment.
+	Environment string `yaml:"environment,omitempty" json:"environment,omitempty"`
 }
 
 // Load reads, parses, defaults, and fully validates the config file at
@@ -296,6 +341,28 @@ func (c Config) validate(requireSlack bool) error {
 	}
 	if err := c.LLM.Validate(); err != nil {
 		return fmt.Errorf("llm: %w", err)
+	}
+	seen := map[string]bool{}
+	for i, binding := range c.Services {
+		if strings.TrimSpace(binding.Service) == "" {
+			return fmt.Errorf("services[%d]: service is required", i)
+		}
+		if strings.TrimSpace(binding.Environment) == "" {
+			return fmt.Errorf("services[%d]: environment is required", i)
+		}
+		// A duplicate binding is ambiguous rather than harmless: two entries
+		// for one service/environment would silently pick whichever the map
+		// build happened to write last, and the numbers reported would
+		// depend on file order.
+		if seen[binding.Key()] {
+			return fmt.Errorf("services[%d]: duplicate binding for %s/%s", i, binding.Service, binding.Environment)
+		}
+		seen[binding.Key()] = true
+	}
+	for channel, scope := range c.Notify.Slack.ChannelServices {
+		if strings.TrimSpace(scope.Service) == "" {
+			return fmt.Errorf("notify.slack.channel_services[%s]: service is required", channel)
+		}
 	}
 	return nil
 }

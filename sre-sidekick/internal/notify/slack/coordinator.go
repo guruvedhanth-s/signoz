@@ -14,6 +14,7 @@ import (
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mutation"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/session"
 )
 
@@ -39,8 +40,15 @@ type Coordinator struct {
 	logger          *slog.Logger
 	metrics         *Metrics
 	mutationEnabled bool
+	copilot         Copilot
 
 	defaultEnvironment string
+	// channelServices maps a Slack channel id to the service a question
+	// asked there is about, so "@sidekick how are we doing?" in an
+	// incident channel needs no service named. Static configuration on
+	// purpose: it needs no channels:read scope, no app reinstall, and
+	// nothing is inferred from a channel name that someone may rename.
+	channelServices map[string]CopilotScope
 
 	// analysis bounds concurrent RCA runs. Button clicks and lookups are
 	// cheap and are deliberately not gated by it; the analysis is what costs
@@ -104,6 +112,31 @@ func WithCoordinatorMutationExecution(enabled bool) CoordinatorOption {
 	return func(c *Coordinator) { c.mutationEnabled = enabled }
 }
 
+// WithCopilot attaches the deterministic tool surface that answers
+// session-less questions. Until attached, an @mention is answered with an
+// explanation rather than a guess (UnavailableCopilot).
+func WithCopilot(copilot Copilot) CoordinatorOption {
+	return func(c *Coordinator) {
+		if copilot != nil {
+			c.copilot = copilot
+		}
+	}
+}
+
+// WithChannelServices sets the channel-to-service mapping used to scope a
+// question that names no service.
+func WithChannelServices(mapping map[string]CopilotScope) CoordinatorOption {
+	return func(c *Coordinator) {
+		if len(mapping) == 0 {
+			return
+		}
+		c.channelServices = make(map[string]CopilotScope, len(mapping))
+		for channel, scope := range mapping {
+			c.channelServices[channel] = scope
+		}
+	}
+}
+
 // WithMaxConcurrentAnalysis caps concurrent RCA runs.
 func WithMaxConcurrentAnalysis(limit int) CoordinatorOption {
 	return func(c *Coordinator) {
@@ -145,6 +178,7 @@ func NewCoordinator(
 		client:             client,
 		sessions:           sessions,
 		rca:                rca,
+		copilot:            UnavailableCopilot{},
 		actuator:           NoopActuator{},
 		authorizer:         PermissiveAuthorizer{},
 		logger:             slog.Default(),
@@ -581,6 +615,102 @@ func (c *Coordinator) OnMessage(ctx context.Context, msg Message) {
 			"correlation_id", found.CorrelationID, "error", err.Error())
 	}
 	c.reply(ctx, found, answer)
+}
+
+// OnMention handles a direct address to the sidekick outside any incident
+// it started: an @mention in a channel or thread, or a direct message.
+//
+// It is a separate entry point from OnMessage rather than a branch inside
+// it, because the routing rules genuinely differ: OnMessage answers from a
+// session's frozen diagnosis and stays silent everywhere else, while this
+// answers from live state and is expected to speak wherever it is
+// addressed. Folding the two together would mean one function with two
+// unrelated notions of "should I reply", which is the shape that rots.
+//
+// Three cases, in priority order:
+//
+//  1. A mention inside a live session thread is a follow-up about that
+//     incident. It is delegated to OnMessage unchanged, so the frozen
+//     grounding, the turn lock and the decision-word handling all continue
+//     to apply. This path must not regress.
+//  2. A mention inside any other thread is answered from live state, and
+//     deliberately says nothing about the thread it landed in - the
+//     sidekick has not read that conversation and must not imply it has.
+//  3. A top-level mention or a DM is answered from live state.
+func (c *Coordinator) OnMention(ctx context.Context, mention Mention) {
+	if mention.FromBot || strings.TrimSpace(mention.Text) == "" {
+		return
+	}
+
+	if mention.InThread() {
+		if found, ok := c.sessions.ByThread(mention.ChannelID, mention.ThreadTS); ok && !found.Status().Terminal() {
+			c.OnMessage(ctx, Message{
+				EventID:   mention.TurnID,
+				ChannelID: mention.ChannelID,
+				ThreadTS:  mention.ThreadTS,
+				MessageTS: mention.MessageTS,
+				UserID:    mention.UserID,
+				Text:      mention.Text,
+				TeamID:    mention.TeamID,
+			})
+			return
+		}
+	}
+
+	c.answerLive(ctx, mention)
+}
+
+// answerLive answers a session-less question from live state.
+func (c *Coordinator) answerLive(ctx context.Context, mention Mention) {
+	if c.copilot == nil {
+		c.copilot = UnavailableCopilot{}
+	}
+
+	// Identity is attached before any model call so the per-user and
+	// per-channel budgets in internal/rca/limits actually bind. A chatbot
+	// in a shared channel is a far easier way to spend money than an alert
+	// storm, and an unattributed request is one no cap can stop.
+	ctx = limits.WithIdentity(ctx, mention.UserID, mention.ChannelID)
+
+	release, err := c.acquireAnalysis(ctx)
+	if err != nil {
+		c.postReply(ctx, mention.ChannelID, mention.ReplyThreadTS(),
+			"Too many questions are being answered right now. Ask again in a moment.")
+		return
+	}
+	defer release()
+
+	answer, err := c.copilot.Answer(ctx, mention.Text, c.scopeFor(mention))
+	if err != nil {
+		if errors.Is(err, ErrCopilotUnavailable) {
+			c.postReply(ctx, mention.ChannelID, mention.ReplyThreadTS(),
+				"I can't answer questions about live state yet: the reliability tool surface is not connected. "+
+					"Incident threads I opened still work.")
+			return
+		}
+		c.logger.Error("copilot question failed",
+			"channel", mention.ChannelID, "user", mention.UserID, "error", err.Error())
+		c.postReply(ctx, mention.ChannelID, mention.ReplyThreadTS(), "I could not answer that: "+err.Error())
+		return
+	}
+
+	c.postReply(ctx, mention.ChannelID, mention.ReplyThreadTS(), answer)
+}
+
+// scopeFor resolves which service a question is about when it names none.
+// The channel mapping wins over the global default because it is the more
+// specific statement; the environment falls back to the configured default
+// so a mapping may name only a service.
+//
+// A mention that resolves to nothing is not an error here: the copilot is
+// given an empty scope and asks which service, rather than this layer
+// picking one.
+func (c *Coordinator) scopeFor(mention Mention) CopilotScope {
+	scope := c.channelServices[mention.ChannelID]
+	if strings.TrimSpace(scope.Environment) == "" {
+		scope.Environment = c.defaultEnvironment
+	}
+	return scope
 }
 
 func (c *Coordinator) answer(ctx context.Context, request FollowupRequest) (string, error) {

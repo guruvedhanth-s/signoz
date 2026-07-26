@@ -14,6 +14,8 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 )
 
 const (
@@ -53,9 +55,22 @@ func NewEmitter(ctx context.Context, endpoint string) (*Emitter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create OTLP metrics exporter: %w", err)
 	}
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(
-		sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(time.Second)),
-	))
+	// Without an explicit resource the SDK falls back to
+	// service.name="unknown_service:<binary>", which is what these metrics
+	// were arriving in SigNoz under. The per-point attributes still carry the
+	// *audited* service, so queries worked, but the emitting service showed as
+	// unknown in every service-scoped view and filter. Name it after the
+	// sidekick, not the audited service: the resource describes who produced
+	// the metric, and one process emits for many services.
+	provider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String("sre-sidekick"),
+		)),
+		sdkmetric.WithReader(
+			sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(time.Second)),
+		),
+	)
 	meter := provider.Meter("sre-sidekick")
 	newFloat := func(name, description string) (metric.Float64Gauge, error) {
 		return meter.Float64Gauge(name, metric.WithDescription(description))

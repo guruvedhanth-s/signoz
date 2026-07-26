@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,10 @@ type Handler interface {
 	// OnMessage handles a human message. Messages posted by bots are filtered
 	// out before this is called.
 	OnMessage(ctx context.Context, msg Message)
+	// OnMention handles a direct address to the sidekick: an @mention in a
+	// channel or thread, or a direct message. Bot-authored mentions are
+	// filtered out before this is called.
+	OnMention(ctx context.Context, mention Mention)
 	// OnInteraction handles a Block Kit button click: approve, decline or
 	// close.
 	OnInteraction(ctx context.Context, interaction Interaction)
@@ -71,6 +76,7 @@ type Receiver struct {
 	workers     int
 	queueSize   int
 	workTimeout time.Duration
+	botUserID   string
 
 	dedup *dedupCache
 	now   func() time.Time
@@ -124,6 +130,17 @@ func WithWorkTimeout(timeout time.Duration) ReceiverOption {
 		if timeout > 0 {
 			r.workTimeout = timeout
 		}
+	}
+}
+
+// WithBotUserID sets the bot user id returned by auth.test. When a plain
+// message delivery starts with this handle, the receiver drops it and lets
+// Slack's app_mention delivery handle the turn. Without the id, the receiver
+// cannot tell @sidekick from @alice, so it keeps leading-handle messages on the
+// ordinary Message path rather than risking a false copilot answer.
+func WithBotUserID(userID string) ReceiverOption {
+	return func(r *Receiver) {
+		r.botUserID = strings.TrimSpace(userID)
 	}
 }
 
@@ -218,6 +235,7 @@ type job struct {
 	kind        string
 	id          string
 	message     *Message
+	mention     *Mention
 	interaction *Interaction
 	command     *Command
 }
@@ -300,6 +318,13 @@ func (r *Receiver) decode(event socketmode.Event) (job, bool) {
 		if !ok {
 			return job{}, false
 		}
+		if mention, ok := mentionFrom(apiEvent, eventID(apiEvent, event.Request)); ok {
+			if mention.FromBot || mention.UserID == "" || mention.Text == "" {
+				return job{}, false
+			}
+			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
+		}
+
 		msg, ok := messageFrom(apiEvent, eventID(apiEvent, event.Request))
 		if !ok {
 			return job{}, false
@@ -312,7 +337,17 @@ func (r *Receiver) decode(event socketmode.Event) (job, bool) {
 		if msg.UserID == "" || msg.Text == "" {
 			return job{}, false
 		}
-		return job{kind: "message", id: msg.EventID, message: &msg}, true
+		if mention, ok := directMessageFrom(msg, msg.ChannelType); ok {
+			// A DM is addressed to the sidekick by definition; there is no
+			// handle to look for and no unrelated conversation to barge into.
+			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
+		}
+		if handle := leadingHandleID(msg.Text); handle != "" && handle == r.botUserID {
+			// Slack also sends app_mention for this same turn. Drop the plain
+			// message delivery instead of racing two handlers on one dedup key.
+			return job{}, false
+		}
+		return job{kind: "message", id: eventID(apiEvent, event.Request), message: &msg}, true
 
 	case socketmode.EventTypeInteractive:
 		callback, ok := event.Data.(slack.InteractionCallback)
@@ -365,6 +400,8 @@ func (r *Receiver) run(base context.Context, next job) {
 	switch {
 	case next.message != nil:
 		r.handler.OnMessage(ctx, *next.message)
+	case next.mention != nil:
+		r.handler.OnMention(ctx, *next.mention)
 	case next.interaction != nil:
 		r.handler.OnInteraction(ctx, *next.interaction)
 	case next.command != nil:

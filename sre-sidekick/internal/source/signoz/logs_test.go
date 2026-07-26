@@ -89,7 +89,20 @@ func TestNormalizeLogsMarksLimitSizedResponsesPartial(t *testing.T) {
 	response.Data.Data.Results = append(response.Data.Data.Results, result)
 
 	snapshot := normalizeLogs(response, 1)
-	if snapshot.QueryComplete || !snapshot.Partial || snapshot.Complete() {
-		t.Fatalf("limit-sized result must be treated as partial: %+v", snapshot)
+
+	// A limit-sized response is a capped sample, not a failed query, and the
+	// two are read by different consumers: Track A reads Complete(), while
+	// the RCA evidence gate reads QueryComplete on its own and refuses to
+	// diagnose when it is false. Reporting truncation as an incomplete query
+	// made every well-instrumented service undiagnosable, so QueryComplete
+	// must stay true here while Partial carries the truncation.
+	if !snapshot.QueryComplete {
+		t.Errorf("a truncated response still ran the query; QueryComplete must stay true: %+v", snapshot)
+	}
+	if !snapshot.Partial {
+		t.Errorf("limit-sized result must be marked partial: %+v", snapshot)
+	}
+	if snapshot.Complete() {
+		t.Errorf("Complete() must stay false for a capped sample: %+v", snapshot)
 	}
 }

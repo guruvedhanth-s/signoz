@@ -1,0 +1,61 @@
+# SLOs for the demo-app checkout service (see demo-app/ at the repo root).
+#
+# Two SLIs on purpose, measuring different things, so an injected fault can
+# break one while the other stays healthy:
+#
+#   - checkout-availability breaks under payments_errors and payments_timeout.
+#   - checkout-latency breaks under payments_latency, which returns 200s slowly
+#     and therefore does *not* move the availability SLI at all.
+#
+# That separation is the point. A single "is it up" SLO would call a service
+# that answers every request in 1.4 seconds perfectly healthy.
+version: "1"
+service: checkout-api
+environment: local
+
+slos:
+  - name: checkout-availability
+    description: Checkout attempts should end in a confirmed order.
+    type: ratio
+    target: 0.99
+    # 5m to match the demo SLO window used elsewhere: short enough that both
+    # the breach and the recovery are visible inside a demo, and documented in
+    # hackathon/RECORDING-SCRIPT.md as a recording concession rather than a
+    # sane production window. A real service wants 30d.
+    window: 5m
+    requires_completeness: true
+    completeness_threshold: 0.95
+    # Business counters, not HTTP status codes. A ratio SLI needs two distinct
+    # metric names, and "did the order go through" is the question that matters.
+    good_metric: checkout_orders_confirmed_total
+    total_metric: checkout_orders_total
+    dependencies:
+      - checkout_orders_total
+      - checkout_orders_confirmed_total
+    # The demo app sets these as resource attributes, so they arrive as metric
+    # labels under the OTel semantic-convention names rather than the
+    # underscored custom keys a hand-written counter might use.
+    service_label: service.name
+    environment_label: deployment.environment
+
+  - name: checkout-latency
+    description: 99% of checkout requests should complete within one second.
+    type: latency_threshold
+    target: 0.99
+    window: 5m
+    latency_metric: http.server.request.duration
+    threshold_ms: 1000
+    # The OTel SDK exports a histogram as dot-separated child series, so the
+    # bucket and count series have to be named explicitly - deriving them from
+    # latency_metric alone would produce the underscore-suffixed OTel
+    # convention names, which do not exist here. Confirmed live: the metrics
+    # arrive as http.server.request.duration.bucket / .count / .sum.
+    latency_bucket_metric: http.server.request.duration.bucket
+    latency_count_metric: http.server.request.duration.count
+    # The demo app records this histogram in *seconds*
+    # (metric.WithUnit("s")), so its "le" bucket boundaries are seconds. The
+    # default is milliseconds, which would make a 1s threshold compare against
+    # a boundary a thousand times too large and report everything as fast.
+    latency_bucket_unit: s
+    service_label: service.name
+    environment_label: deployment.environment

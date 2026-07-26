@@ -356,6 +356,41 @@ func jsonEscape(s string) string {
 	return strings.Trim(string(b), `"`)
 }
 
+// CompleteText is a single plain-prose completion: one system message, one
+// user message, no tools, no JSON contract. It exists so other packages
+// can reuse this client - the retry handling, the error decoding, the
+// timeout, the max-tokens cap - instead of opening a second HTTP path to
+// the same provider, which would be two places to fix every time
+// OpenRouter changes something.
+//
+// Tools are deliberately unavailable here. A caller that wants prose has
+// already gathered its facts; letting the model reach for more mid-sentence
+// would turn a wording call into an unbounded, paid evidence hunt.
+//
+// The empty-API-key case returns an error rather than degrading, because
+// only the caller knows whether a missing model is fatal or simply means
+// "use the deterministic path instead".
+func (r *LLMReasoner) CompleteText(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	if strings.TrimSpace(r.APIKey) == "" {
+		return "", fmt.Errorf("rca: LLMReasoner has no OpenRouter API key")
+	}
+	ctx, cancel := r.withTimeout(ctx)
+	defer cancel()
+
+	choice, err := r.complete(ctx, []chatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}, false)
+	if err != nil {
+		return "", err
+	}
+	text := strings.TrimSpace(choice.Message.Content)
+	if text == "" {
+		return "", fmt.Errorf("rca: LLM returned an empty completion")
+	}
+	return text, nil
+}
+
 // complete performs one chat-completions request and returns the first
 // choice.
 func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allowTools bool) (choice chatChoice, err error) {
