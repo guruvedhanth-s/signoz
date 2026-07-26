@@ -302,6 +302,27 @@ go run ./cmd/reliability-agent audit-watch \
 The webhook receives the same firing and resolved JSON documents printed by the
 watcher.
 
+### Slack Incoming Webhook delivery
+
+A workspace that only granted an Incoming Webhook URL, with no bot token, can
+receive the same alerts as plain Slack messages:
+
+```bash
+export SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...'
+go run ./cmd/reliability-agent audit-watch \
+  --profile examples/demo-agent.yaml \
+  --slack-webhook-url "$SLACK_WEBHOOK_URL"
+```
+
+The Slack sink posts a `{"text": "..."}` payload, because Slack does not render
+the internal event JSON. Both flags can be set at once: `--webhook-url` keeps
+delivering the full SRE Sidekick event JSON to integrations that parse it.
+
+This sink is the fallback path. When a bot token is available, prefer the Track D
+Slack adapter under `internal/notify/slack`, configured through
+`configs/sidekick.yaml`: it renders Block Kit, threads each incident, and carries
+the approval actions that a plain Incoming Webhook cannot.
+
 ## Run an SLO evaluation
 
 ```bash
@@ -381,9 +402,22 @@ go test ./...
 go vet ./...
 ```
 
+Run the complete local workflow without a live SigNoz installation:
+
+```bash
+make demo
+```
+
+The demo drives an in-process SigNoz API stub and webhook receiver, but exercises
+the real authenticated API, profile registration and activation, Track A audit,
+Track B SLO evaluation, the completeness gate, alert debounce, webhook delivery,
+and the recovery transition. A live run still needs the prerequisites above.
+
 Convenience targets:
 
 ```bash
+make vet
+make demo
 make run
 make run-demo-agent
 make run-demo-agent-buggy
