@@ -3,7 +3,6 @@ package rca
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
@@ -85,7 +84,7 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 // fabricating one when the reasoner is not the real thing.
 func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupRequest) (string, error) {
 	ctx = limits.WithIdentity(ctx, req.AskedBy, req.ChannelID)
-	if isWhatChangedIntent(req.Question) {
+	if ResolveIntent(req.Question) == IntentWhatChanged {
 		if summary := req.Diagnosis.Grounding.RecentDeploy.Summary(); summary != "" {
 			return summary, nil
 		}
@@ -113,11 +112,6 @@ func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupReq
 		History:       history,
 		Question:      req.Question,
 	})
-}
-
-func isWhatChangedIntent(question string) bool {
-	question = strings.ToLower(strings.TrimSpace(question))
-	return strings.Contains(question, "what changed") || strings.Contains(question, "what was deployed")
 }
 
 // Verify keeps the deterministic recovery check behind the RCA boundary.

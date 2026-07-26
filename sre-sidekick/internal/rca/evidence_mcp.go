@@ -119,6 +119,9 @@ func (s *MCPEvidenceSource) DeployEvents(ctx context.Context, inc Incident) ([]n
 	if s.Client == nil {
 		return nil, false, fmt.Errorf("rca: MCPEvidenceSource has no MCP client")
 	}
+	if _, err := slo.WindowDuration(inc.Window); err != nil {
+		return nil, false, fmt.Errorf("invalid incident window: %w", err)
+	}
 	start, end := windowMillis(s.now(), inc.Window)
 	result, err := s.Client.CallTool(ctx, "signoz_search_traces", map[string]any{
 		"service": inc.Service, "name": "deployment.marker", "start": start, "end": end, "limit": maxEvidenceItems,
@@ -152,6 +155,16 @@ func stringValue(record map[string]any, key string) string {
 	if value, ok := record[key].(string); ok {
 		return strings.TrimSpace(value)
 	}
+	// MCP versions differ: some flatten resource attributes, others retain
+	// them under resource/resourceAttributes/attributes. Read only the exact
+	// requested key from those known containers.
+	for _, container := range []string{"resource", "resourceAttributes", "resource_attributes", "attributes"} {
+		if nested, ok := record[container].(map[string]any); ok {
+			if value, ok := nested[key].(string); ok {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
 	return ""
 }
 
@@ -162,7 +175,7 @@ func stringValue(record map[string]any, key string) string {
 func windowMillis(end time.Time, window string) (startMs, endMs int64) {
 	duration, err := slo.WindowDuration(window)
 	if err != nil {
-		duration = time.Hour
+		return end.UnixMilli(), end.UnixMilli()
 	}
 	return end.Add(-duration).UnixMilli(), end.UnixMilli()
 }
