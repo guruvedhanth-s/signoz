@@ -124,6 +124,14 @@ func formatDuration(d time.Duration) string {
 	if d < time.Hour {
 		return d.Round(time.Minute).String()
 	}
+	if d < 24*time.Hour {
+		hours := int(d / time.Hour)
+		minutes := int((d - time.Duration(hours)*time.Hour) / time.Minute)
+		if minutes == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
 	return d.Round(time.Hour).String()
 }
 

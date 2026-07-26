@@ -122,9 +122,16 @@ func (s *MCPEvidenceSource) DeployEvents(ctx context.Context, inc Incident) ([]n
 	if _, err := slo.WindowDuration(inc.Window); err != nil {
 		return nil, false, fmt.Errorf("invalid incident window: %w", err)
 	}
-	start, end := windowMillis(s.now(), inc.Window)
+	anchor := inc.Onset
+	if anchor.IsZero() {
+		anchor = inc.Grounding.EvaluatedStart
+	}
+	if anchor.IsZero() {
+		anchor = s.now()
+	}
+	start, end := deployWindowMillis(anchor, inc.Window)
 	result, err := s.Client.CallTool(ctx, "signoz_search_traces", map[string]any{
-		"service": inc.Service, "name": "deployment.marker", "start": start, "end": end, "limit": maxEvidenceItems,
+		"service": inc.Service, "name": "deploy", "deploy.marker": true, "start": start, "end": end, "limit": maxEvidenceItems,
 	})
 	if err != nil {
 		return nil, false, err
@@ -136,7 +143,7 @@ func (s *MCPEvidenceSource) DeployEvents(ctx context.Context, inc Incident) ([]n
 	var events []notify.DeployEvent
 	for _, result := range payload.Data.Data.Results {
 		for _, row := range result.Rows {
-			version := stringValue(row.Data, "service.version")
+			version := stringValue(row.Data, "deploy.version")
 			deployID := stringValue(row.Data, "deploy.id")
 			if version == "" && deployID == "" {
 				continue
@@ -170,14 +177,22 @@ func stringValue(record map[string]any, key string) string {
 
 // windowMillis converts an incident window (e.g. "1h") and an end time
 // into the [start, end] unix-millisecond bounds SigNoz MCP tools expect.
-// An unparsable window falls back to a 1-hour lookback rather than
-// failing evidence gathering outright.
+// Callers validate the window before starting a diagnosis; this defensive
+// fallback produces an empty range rather than querying an invented period.
 func windowMillis(end time.Time, window string) (startMs, endMs int64) {
 	duration, err := slo.WindowDuration(window)
 	if err != nil {
 		return end.UnixMilli(), end.UnixMilli()
 	}
 	return end.Add(-duration).UnixMilli(), end.UnixMilli()
+}
+
+func deployWindowMillis(onset time.Time, window string) (startMs, endMs int64) {
+	duration, err := slo.WindowDuration(window)
+	if err != nil {
+		return onset.UnixMilli(), onset.UnixMilli()
+	}
+	return onset.Add(-2 * duration).UnixMilli(), onset.UnixMilli()
 }
 
 // spanQueryEnvelope is the response shape shared by signoz_search_traces,
