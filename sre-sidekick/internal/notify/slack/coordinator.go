@@ -32,6 +32,7 @@ type Coordinator struct {
 	sessions *session.Manager
 	rca      RCA
 	actuator Actuator
+	auditor  session.Auditor
 	logger   *slog.Logger
 	metrics  *Metrics
 
@@ -76,6 +77,12 @@ func WithCoordinatorActuator(actuator Actuator) CoordinatorOption {
 			c.actuator = actuator
 		}
 	}
+}
+
+// WithCoordinatorAuditor records durable lifecycle events without coupling
+// the Slack coordinator to a database implementation.
+func WithCoordinatorAuditor(auditor session.Auditor) CoordinatorOption {
+	return func(c *Coordinator) { c.auditor = auditor }
 }
 
 // WithMaxConcurrentAnalysis caps concurrent RCA runs.
@@ -165,6 +172,7 @@ func (c *Coordinator) Announce(ctx context.Context, d notify.Diagnosis) (*sessio
 		return nil, fmt.Errorf("slack: open session: %w", err)
 	}
 	if !existing {
+		c.audit(session.AuditEvent{Type: "diagnosis_announced", CorrelationID: d.CorrelationID, Service: d.Service, Environment: d.Environment})
 		c.metrics.IncidentAnnounced(ctx, d.Service, d.Environment, string(statusOr(d.Status, notify.StatusDiagnosed)))
 		c.logger.Info("incident session opened",
 			"correlation_id", d.CorrelationID,
@@ -226,6 +234,7 @@ func (c *Coordinator) decide(
 		))
 		return
 	}
+	c.audit(session.AuditEvent{Type: "decision_recorded", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID, Payload: fmt.Sprintf(`{"decision":%q}`, kind)})
 
 	verb := "approved"
 	detail := "Recorded as approved. Nothing was executed: apply the fix by hand, then verify."
@@ -311,6 +320,7 @@ func (c *Coordinator) verify(ctx context.Context, s *session.Session, in Interac
 	}
 
 	c.metrics.VerifyChecked(ctx, s.Service, s.Environment, result.SLOState)
+	c.audit(session.AuditEvent{Type: "verification_completed", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID})
 	c.logger.Info("verify checked",
 		"correlation_id", s.CorrelationID,
 		"service", s.Service,
@@ -350,6 +360,7 @@ func (c *Coordinator) closeSession(ctx context.Context, s *session.Session, in I
 		return
 	}
 	c.metrics.DecisionRecorded(ctx, s.Service, s.Environment, "closed")
+	c.audit(session.AuditEvent{Type: "session_closed", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID})
 	c.logger.Info("session closed",
 		"correlation_id", s.CorrelationID, "user", in.UserID, "thread_ts", s.ThreadTS)
 
@@ -444,6 +455,7 @@ func (c *Coordinator) OnMessage(ctx context.Context, msg Message) {
 		c.noticeClosedOnce(ctx, found, msg)
 		return
 	}
+	c.audit(session.AuditEvent{Type: "followup_requested", CorrelationID: found.CorrelationID, Service: found.Service, Environment: found.Environment, Actor: msg.UserID})
 
 	// Free text is never a decision. When someone types "approve" we say where
 	// the button is rather than recording an approval from parsed prose: a
@@ -585,6 +597,7 @@ func (c *Coordinator) OnCommand(ctx context.Context, cmd Command) {
 	diagnosis, err := c.rca.Diagnose(ctx, DiagnoseRequest{
 		Service:     service,
 		Environment: environment,
+		ChannelID:   cmd.ChannelID,
 		RequestedBy: cmd.UserID,
 	})
 	if err != nil {
@@ -654,6 +667,15 @@ func (c *Coordinator) postReply(ctx context.Context, channelID, threadTS, text s
 	if _, err := c.client.PostThreadReply(ctx, channelID, threadTS, text); err != nil {
 		c.logger.Error("could not post a reply",
 			"channel", channelID, "thread_ts", threadTS, "error", err.Error())
+	}
+}
+
+func (c *Coordinator) audit(event session.AuditEvent) {
+	if c.auditor == nil {
+		return
+	}
+	if err := c.auditor.Append(event); err != nil {
+		c.logger.Error("audit event not persisted", "type", event.Type, "error", err)
 	}
 }
 

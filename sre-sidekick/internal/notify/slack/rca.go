@@ -36,6 +36,7 @@ type RCA interface {
 type DiagnoseRequest struct {
 	Service     string
 	Environment string
+	ChannelID   string
 	// RequestedBy is the Slack user id that asked, for the audit trail.
 	// Empty for an alert-driven diagnosis - nobody asked, an alert did.
 	RequestedBy string
@@ -62,6 +63,7 @@ type DiagnoseRequest struct {
 // E13).
 type FollowupRequest struct {
 	CorrelationID string
+	ChannelID     string
 	Service       string
 	Environment   string
 	Window        string
@@ -133,6 +135,7 @@ func followupRequest(s *session.Session, question, askedBy string) FollowupReque
 
 	return FollowupRequest{
 		CorrelationID: view.CorrelationID,
+		ChannelID:     view.ChannelID,
 		Service:       view.Service,
 		Environment:   view.Environment,
 		Window:        view.Window,

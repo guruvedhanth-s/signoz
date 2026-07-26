@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mcp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 )
 
 // LLMReasoner is the M4 real reasoner: it turns grounded facts and gathered
@@ -46,6 +49,10 @@ import (
 // so the model can pull additional live evidence during reasoning, bounded
 // by MaxToolCalls so a single Reason call cannot run away.
 type LLMReasoner struct {
+	// Limits is shared by diagnoses and follow-ups when the same reasoner is
+	// used by watch. Nil preserves the unbounded legacy behavior for callers
+	// that explicitly construct a reasoner in tests.
+	Limits *limits.Manager
 	// APIKey is the OpenRouter API key (OPENROUTER_API_KEY). Required;
 	// Reason returns an error immediately if it is empty rather than
 	// silently falling back to anything.
@@ -347,7 +354,22 @@ func jsonEscape(s string) string {
 
 // complete performs one chat-completions request and returns the first
 // choice.
-func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allowTools bool) (chatChoice, error) {
+func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allowTools bool) (choice chatChoice, err error) {
+	reservedTokens := estimateMessageTokens(messages) + r.maxTokens()
+	if r.Limits != nil {
+		req := limits.Identity(ctx)
+		req.EstimatedTokens = reservedTokens
+		if err := r.Limits.Allow(ctx, req); err != nil {
+			slog.Warn("rca LLM request rejected", "reason", err.Error())
+			return chatChoice{}, err
+		}
+	}
+	defer func() {
+		var failure providerFailure
+		if err != nil && r.Limits != nil && errors.As(err, &failure) {
+			r.Limits.RecordFailure()
+		}
+	}()
 	req := chatCompletionRequest{
 		Model:       r.Model,
 		Messages:    messages,
@@ -372,7 +394,7 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 
 	resp, err := r.httpClient().Do(httpReq)
 	if err != nil {
-		return chatChoice{}, fmt.Errorf("rca: LLM request failed: %w", err)
+		return chatChoice{}, providerFailure{err: fmt.Errorf("rca: LLM request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
@@ -381,7 +403,7 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 		return chatChoice{}, fmt.Errorf("rca: read LLM response: %w", err)
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		return chatChoice{}, fmt.Errorf("rca: LLM http %d: %s", resp.StatusCode, bytes.TrimSpace(raw))
+		return chatChoice{}, providerFailure{err: fmt.Errorf("rca: LLM http %d: %s", resp.StatusCode, bytes.TrimSpace(raw))}
 	}
 
 	var parsed chatCompletionResponse
@@ -393,6 +415,10 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 	}
 	if len(parsed.Choices) == 0 {
 		return chatChoice{}, fmt.Errorf("rca: LLM returned no choices")
+	}
+	if r.Limits != nil {
+		r.Limits.Reconcile(reservedTokens, parsed.Usage.TotalTokens)
+		r.Limits.RecordSuccess()
 	}
 	return parsed.Choices[0], nil
 }
@@ -502,9 +528,33 @@ type chatChoice struct {
 
 type chatCompletionResponse struct {
 	Choices []chatChoice `json:"choices"`
-	Error   *struct {
+	Usage   struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+type providerFailure struct{ err error }
+
+func (e providerFailure) Error() string { return e.err.Error() }
+func (e providerFailure) Unwrap() error { return e.err }
+
+func estimateMessageTokens(messages []chatMessage) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Role)/4 + len(message.Content)/4 + 8
+		for _, call := range message.ToolCalls {
+			total += len(call.Function.Name)/4 + len(call.Function.Arguments)/4 + 8
+		}
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
 }
 
 // --- model diagnosis JSON parsing ---

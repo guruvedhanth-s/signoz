@@ -61,10 +61,21 @@ type Manager struct {
 	closedRetention     time.Duration
 	extraEvidenceBudget int
 	now                 func() time.Time
+	store               Store
 }
 
 // ManagerOption customises a Manager.
 type ManagerOption func(*Manager)
+
+// WithStore enables session snapshot persistence. The memory store is used
+// when omitted, preserving the original local behavior.
+func WithStore(store Store) ManagerOption {
+	return func(m *Manager) {
+		if store != nil {
+			m.store = store
+		}
+	}
+}
 
 // WithTTL sets the idle timeout used by ReapIdle.
 func WithTTL(ttl time.Duration) ManagerOption {
@@ -112,6 +123,7 @@ func NewManager(opts ...ManagerOption) *Manager {
 		closedRetention:     DefaultClosedRetention,
 		extraEvidenceBudget: DefaultExtraEvidenceBudget,
 		now:                 time.Now,
+		store:               NewMemoryStore(),
 	}
 	for _, opt := range opts {
 		opt(manager)
@@ -158,9 +170,9 @@ func (m *Manager) Open(req OpenRequest) (*Session, bool, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if existing, ok := m.byFingerprint[fingerprint]; ok {
+		m.mu.Unlock()
 		return existing, true, nil
 	}
 
@@ -182,15 +194,49 @@ func (m *Manager) Open(req OpenRequest) (*Session, bool, error) {
 
 	m.byThread[threadKey(channel, thread)] = created
 	m.byFingerprint[fingerprint] = created
+	snapshot := created.viewLocked()
+	m.mu.Unlock()
+	// Persistence intentionally happens outside the manager lock so a slow or
+	// unavailable store cannot block routing. During this small window a
+	// concurrent lookup may observe the in-memory session; on persistence
+	// failure the indexes are rolled back and the caller receives the error.
+	if err := m.persistView(snapshot); err != nil {
+		m.mu.Lock()
+		delete(m.byThread, threadKey(channel, thread))
+		delete(m.byFingerprint, fingerprint)
+		m.mu.Unlock()
+		return nil, false, fmt.Errorf("session: persist open: %w", err)
+	}
 	return created, false, nil
 }
 
 // ByThread routes an inbound reply or button click to its session.
 func (m *Manager) ByThread(channelID, threadTS string) (*Session, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	found, ok := m.byThread[threadKey(strings.TrimSpace(channelID), strings.TrimSpace(threadTS))]
-	return found, ok
+	m.mu.RUnlock()
+	if ok {
+		return found, true
+	}
+	if m.store == nil {
+		return nil, false
+	}
+	view, err := m.store.Load(strings.TrimSpace(channelID), strings.TrimSpace(threadTS))
+	if err != nil {
+		return nil, false
+	}
+	rehydrated := sessionFromView(view)
+	m.mu.Lock()
+	if existing, exists := m.byThread[threadKey(view.ChannelID, view.ThreadTS)]; exists {
+		m.mu.Unlock()
+		return existing, true
+	}
+	m.byThread[threadKey(view.ChannelID, view.ThreadTS)] = rehydrated
+	if !rehydrated.Status().Terminal() {
+		m.byFingerprint[rehydrated.Fingerprint] = rehydrated
+	}
+	m.mu.Unlock()
+	return rehydrated, true
 }
 
 // ByFingerprint returns the live session for an incident, if there is one.
@@ -198,9 +244,28 @@ func (m *Manager) ByThread(channelID, threadTS string) (*Session, bool) {
 // resolution is a new incident and gets a new thread.
 func (m *Manager) ByFingerprint(fingerprint string) (*Session, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	found, ok := m.byFingerprint[strings.TrimSpace(fingerprint)]
-	return found, ok
+	m.mu.RUnlock()
+	if ok {
+		return found, true
+	}
+	if m.store == nil {
+		return nil, false
+	}
+	view, err := m.store.LoadByFingerprint(strings.TrimSpace(fingerprint))
+	if err != nil {
+		return nil, false
+	}
+	rehydrated := sessionFromView(view)
+	m.mu.Lock()
+	if existing, exists := m.byFingerprint[rehydrated.Fingerprint]; exists {
+		m.mu.Unlock()
+		return existing, true
+	}
+	m.byThread[threadKey(rehydrated.ChannelID, rehydrated.ThreadTS)] = rehydrated
+	m.byFingerprint[rehydrated.Fingerprint] = rehydrated
+	m.mu.Unlock()
+	return rehydrated, true
 }
 
 // Len reports how many sessions are addressable, open and recently closed.
@@ -238,10 +303,10 @@ func (m *Manager) AppendTurn(s *Session, turn Turn) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.status.Terminal() {
-		return fmt.Errorf("%w: %s", ErrSessionClosed, s.status)
+		status := s.status
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSessionClosed, status)
 	}
 	if turn.At.IsZero() {
 		turn.At = m.now()
@@ -251,7 +316,9 @@ func (m *Manager) AppendTurn(s *Session, turn Turn) error {
 		s.participants[string(turn.Actor)] = struct{}{}
 	}
 	s.lastActivity = m.now()
-	return nil
+	snapshot := s.viewLocked()
+	s.mu.Unlock()
+	return m.persistView(snapshot)
 }
 
 // AddEvidence records evidence gathered after the diagnosis to answer a
@@ -262,17 +329,20 @@ func (m *Manager) AddEvidence(s *Session, evidence ...notify.Evidence) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.status.Terminal() {
-		return fmt.Errorf("%w: %s", ErrSessionClosed, s.status)
+		status := s.status
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSessionClosed, status)
 	}
 	if len(s.extraEvidence)+len(evidence) > m.extraEvidenceBudget {
+		s.mu.Unlock()
 		return fmt.Errorf("%w: limit %d", ErrEvidenceBudget, m.extraEvidenceBudget)
 	}
 	s.extraEvidence = append(s.extraEvidence, evidence...)
 	s.lastActivity = m.now()
-	return nil
+	snapshot := s.viewLocked()
+	s.mu.Unlock()
+	return m.persistView(snapshot)
 }
 
 // Decide records a terminal human judgement and closes the session.
@@ -316,9 +386,13 @@ func (m *Manager) Decide(s *Session, decision Decision) (bool, *Decision, error)
 		s.participants[user] = struct{}{}
 	}
 	fingerprint := s.Fingerprint
+	snapshot := s.viewLocked()
 	s.mu.Unlock()
 
 	m.unindexFingerprint(fingerprint, s)
+	if err := m.persistView(snapshot); err != nil {
+		return false, nil, fmt.Errorf("session: persist decision: %w", err)
+	}
 	return true, &recorded, nil
 }
 
@@ -347,10 +421,11 @@ func (m *Manager) Close(s *Session, reason CloseReason) error {
 	s.closedAt = now
 	s.lastActivity = now
 	fingerprint := s.Fingerprint
+	snapshot := s.viewLocked()
 	s.mu.Unlock()
 
 	m.unindexFingerprint(fingerprint, s)
-	return nil
+	return m.persistView(snapshot)
 }
 
 // Touch refreshes the idle clock without recording a turn, e.g. when an alert
@@ -360,10 +435,14 @@ func (m *Manager) Touch(s *Session) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.status.Terminal() {
 		s.lastActivity = m.now()
+		snapshot := s.viewLocked()
+		s.mu.Unlock()
+		_ = m.persistView(snapshot)
+		return
 	}
+	s.mu.Unlock()
 }
 
 // ReapIdle closes sessions that have been idle past the TTL and forgets closed
@@ -402,6 +481,9 @@ func (m *Manager) ReapIdle() []*Session {
 			expired = append(expired, candidate)
 		}
 		candidate.mu.Unlock()
+		if candidate.Status().Terminal() {
+			_ = m.persistView(candidate.View())
+		}
 	}
 
 	if len(expired) > 0 || len(forget) > 0 {
@@ -418,9 +500,38 @@ func (m *Manager) ReapIdle() []*Session {
 			}
 		}
 		m.mu.Unlock()
+		for _, session := range forget {
+			if m.store != nil {
+				_ = m.store.Delete(session.ChannelID, session.ThreadTS)
+			}
+		}
 	}
 
 	return expired
+}
+
+func (m *Manager) persistView(snapshot View) error {
+	if m.store == nil {
+		return nil
+	}
+	return m.store.Save(snapshot)
+}
+
+func sessionFromView(v View) *Session {
+	participants := make(map[string]struct{}, len(v.Participants))
+	for _, p := range v.Participants {
+		participants[p] = struct{}{}
+	}
+	var decision *Decision
+	if v.Decision != nil {
+		d := *v.Decision
+		decision = &d
+	}
+	return &Session{CorrelationID: v.CorrelationID, ChannelID: v.ChannelID, ThreadTS: v.ThreadTS,
+		Fingerprint: v.Fingerprint, Service: v.Service, Environment: v.Environment, Window: v.Window,
+		status: v.Status, diagnosis: v.Diagnosis, extraEvidence: append([]notify.Evidence(nil), v.ExtraEvidence...),
+		history: append([]Turn(nil), v.History...), participants: participants, decision: decision,
+		closeReason: v.CloseReason, CreatedAt: v.CreatedAt, lastActivity: v.LastActivity, closedAt: v.ClosedAt}
 }
 
 func (m *Manager) unindexFingerprint(fingerprint string, s *Session) {

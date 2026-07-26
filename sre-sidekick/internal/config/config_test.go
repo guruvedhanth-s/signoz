@@ -426,3 +426,11 @@ presentation:
 		t.Errorf("Presentation.LatencyShiftThreshold = %v, want the zero value (rca defaults it on use)", cfg.Presentation.LatencyShiftThreshold)
 	}
 }
+
+func TestParse_RejectsUnknownStorageDriver(t *testing.T) {
+	setCredentials(t)
+	_, err := Parse([]byte(minimalYAML + "\nstorage:\n  driver: postgress\n"))
+	if err == nil || !strings.Contains(err.Error(), "unsupported driver") {
+		t.Fatalf("Parse() error = %v, want unsupported storage driver", err)
+	}
+}

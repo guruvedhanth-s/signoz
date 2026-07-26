@@ -41,7 +41,8 @@ const (
 // loaders (`configs/sidekick.yaml` for Slack, a root `sidekick.yaml` for
 // presentation); that split is gone; this is the only sidekick.yaml.
 type Config struct {
-	Notify NotifyConfig `yaml:"notify" json:"notify"`
+	Notify  NotifyConfig  `yaml:"notify" json:"notify"`
+	Storage StorageConfig `yaml:"storage" json:"storage"`
 	// LLM configures the provider driving the RCA reasoner (PRD section 21
 	// decision 3: OpenRouter/DeepSeek, kept swappable behind one interface).
 	LLM LLMConfig `yaml:"llm" json:"llm"`
@@ -56,6 +57,11 @@ type Config struct {
 	// shapes are kept identical so the conversion is a plain type
 	// conversion, not a field-by-field copy.
 	Presentation PresentationConfig `yaml:"presentation" json:"presentation"`
+}
+
+type StorageConfig struct {
+	Driver string `yaml:"driver" json:"driver"`
+	URLEnv string `yaml:"url_env,omitempty" json:"url_env,omitempty"`
 }
 
 // PresentationConfig mirrors rca.PresentationConfig field-for-field (see
@@ -87,7 +93,21 @@ type LLMConfig struct {
 	APIKeyEnv string `yaml:"api_key_env" json:"api_key_env"`
 	// BaseURL overrides the provider's OpenAI-compatible chat-completions
 	// endpoint. Empty uses the provider's default.
-	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
+	BaseURL string          `yaml:"base_url,omitempty" json:"base_url,omitempty"`
+	Limits  LLMLimitsConfig `yaml:"limits" json:"limits"`
+}
+
+type LLMLimitsConfig struct {
+	MaxTokensPerRequest int    `yaml:"max_tokens_per_request" json:"max_tokens_per_request"`
+	HourlyRequests      int    `yaml:"hourly_requests" json:"hourly_requests"`
+	HourlyTokens        int    `yaml:"hourly_tokens" json:"hourly_tokens"`
+	DailyRequests       int    `yaml:"daily_requests" json:"daily_requests"`
+	DailyTokens         int    `yaml:"daily_tokens" json:"daily_tokens"`
+	PerUserRequests     int    `yaml:"per_user_requests" json:"per_user_requests"`
+	PerChannelRequests  int    `yaml:"per_channel_requests" json:"per_channel_requests"`
+	RateWindow          string `yaml:"rate_window" json:"rate_window"`
+	FailureThreshold    int    `yaml:"failure_threshold" json:"failure_threshold"`
+	Cooldown            string `yaml:"cooldown" json:"cooldown"`
 }
 
 // NotifyConfig groups every outbound/inbound chat adapter. Only Slack exists
@@ -126,7 +146,9 @@ type SlackConfig struct {
 	// MaxConcurrentRCA caps how many diagnose runs may be in flight at once so
 	// an alert storm cannot launch unbounded paid LLM/MCP work (session design
 	// edge case E8).
-	MaxConcurrentRCA int `yaml:"max_concurrent_rca" json:"max_concurrent_rca"`
+	MaxConcurrentRCA int    `yaml:"max_concurrent_rca" json:"max_concurrent_rca"`
+	SessionStorePath string `yaml:"session_store_path" json:"session_store_path"`
+	AuditLogPath     string `yaml:"audit_log_path" json:"audit_log_path"`
 }
 
 // Load reads, parses, defaults, and fully validates the config file at
@@ -238,6 +260,19 @@ func (c Config) Validate() error {
 // the Slack section's own validation (and its credential lookups) for
 // callers that do not use it - see LoadForRCA.
 func (c Config) validate(requireSlack bool) error {
+	switch driver := strings.ToLower(strings.TrimSpace(c.Storage.Driver)); driver {
+	case "", "memory":
+	case "file":
+	case "postgres":
+		if strings.TrimSpace(c.Storage.URLEnv) == "" {
+			return fmt.Errorf("storage: url_env is required for postgres")
+		}
+		if strings.TrimSpace(os.Getenv(c.Storage.URLEnv)) == "" {
+			return fmt.Errorf("storage: environment variable %s is required for postgres", c.Storage.URLEnv)
+		}
+	default:
+		return fmt.Errorf("storage: unsupported driver %q (want memory, file, or postgres)", driver)
+	}
 	if requireSlack {
 		if err := c.Notify.Slack.Validate(); err != nil {
 			return fmt.Errorf("notify.slack: %w", err)
