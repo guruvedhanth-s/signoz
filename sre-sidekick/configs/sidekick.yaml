@@ -40,6 +40,18 @@ notify:
     # Optional durable local session snapshots. Leave empty for memory mode.
     session_store_path: ""
     audit_log_path: ""
+    # Mutation execution is opt-in and remains disabled by default.
+    enable_mutations: false
+    # Optional click-time authorization. With no users/groups configured,
+    # advisory MVP behavior remains permissive. Operators also count as
+    # approvers. Group handles require the Slack usergroups:read scope.
+    # authorization:
+    #   approvers:
+    #     users: [U123456789]
+    #     groups: [sre-oncall]
+    #   operators:
+    #     users: [U987654321]
+    #     groups: [sre-operators]
 
 # llm configures the provider driving the RCA reasoner (PRD section 21
 # decision 3: OpenRouter/DeepSeek, kept swappable behind one interface).

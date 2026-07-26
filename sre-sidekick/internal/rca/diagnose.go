@@ -101,6 +101,13 @@ func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, e
 	if err != nil {
 		return notify.Diagnosis{}, fmt.Errorf("rca: gather evidence: %w", err)
 	}
+	if inc.DeployCorrelationEnabled && len(inc.DeployEvents) == 0 {
+		inc.DeployEvents = DeployEventsFromEvidence(ev)
+	}
+	if inc.DeployCorrelationEnabled || len(inc.DeployEvents) > 0 {
+		correlation := CorrelateDeploys(inc.DeployEvents, a.now(), inc.Window)
+		inc.Grounding.RecentDeploy = &correlation
+	}
 	md, err := a.Reasoner.Reason(ctx, inc, ev)
 	if err != nil {
 		diagnosis := a.reasonerFailed(inc, ev, err)

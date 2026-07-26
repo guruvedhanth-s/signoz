@@ -124,6 +124,21 @@ func TestSlackAdapter_AnswerFollowup_RefusesWithoutTheLiveReasoner(t *testing.T)
 	}
 }
 
+func TestSlackAdapter_AnswerFollowup_WhatChangedUsesGroundedDeployCorrelation(t *testing.T) {
+	when := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	adapter := &SlackAdapter{Agent: &Agent{Reasoner: StubReasoner{}}}
+	answer, err := adapter.AnswerFollowup(context.Background(), slack.FollowupRequest{
+		Question:  "what changed?",
+		Diagnosis: notify.Diagnosis{Grounding: notify.Grounding{RecentDeploy: &notify.DeployCorrelation{Candidates: []notify.DeployCandidate{{Version: "v1.4.2", At: when, Gap: 4 * time.Minute}}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "v1.4.2, 4m0s before onset" {
+		t.Fatalf("answer = %q, want the deterministic deploy correlation", answer)
+	}
+}
+
 func TestSlackAdapter_Diagnose_DefaultsWindowTo1h(t *testing.T) {
 	sloPath := writeSLOConfig(t, slackAdapterSLOConfig)
 	metrics := fakeMetrics{Values: map[string]float64{"agent_success_total": 95, "agent_requests_total": 100}}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/slack-go/slack"
 
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/session"
 )
@@ -259,6 +260,38 @@ func TestApproveRecordsTheDeciderAndRetiresTheButtons(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), "decision recorded") {
 		t.Error("the decision was not logged for audit")
+	}
+}
+
+func TestUnauthorizedApproveDoesNotChangeSessionOrInvokeActuator(t *testing.T) {
+	actuator := &fakeActuator{}
+	authorizer, err := NewStaticAuthorizer(config.AuthorizationConfig{
+		Approvers: config.AuthorizationRoleConfig{Users: []string{"U-approved"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t, &fakeRCA{}, WithCoordinatorActuator(actuator), WithCoordinatorAuthorizer(authorizer))
+	opened := announceFixture(t, f)
+
+	f.coordinator.OnInteraction(context.Background(), Interaction{
+		ActionID: ActionApprove, ChannelID: opened.ChannelID,
+		ThreadTS: opened.ThreadTS, MessageTS: opened.ThreadTS, UserID: "U-not-approved",
+	})
+
+	if opened.Decision() != nil {
+		t.Fatal("unauthorized approval changed session decision")
+	}
+	if opened.Status() != session.StatusOpen {
+		t.Fatalf("session status = %q, want open", opened.Status())
+	}
+	actuator.mu.Lock()
+	defer actuator.mu.Unlock()
+	if len(actuator.requests) != 0 {
+		t.Fatal("unauthorized approval invoked the Actuator")
+	}
+	if !strings.Contains(f.lastPosted(t), "not authorized") {
+		t.Fatal("unauthorized approval did not produce a clear thread reply")
 	}
 }
 

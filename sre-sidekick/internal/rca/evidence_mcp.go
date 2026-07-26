@@ -149,6 +149,9 @@ func (e spanQueryEnvelope) records() []map[string]any {
 			if row.Data == nil {
 				continue
 			}
+			if row.Timestamp != "" {
+				row.Data["_timestamp"] = row.Timestamp
+			}
 			out = append(out, row.Data)
 		}
 	}
@@ -167,7 +170,7 @@ var traceFieldAllowlist = []string{
 // logFieldAllowlist names the log fields SanitizeFields is allowed to
 // surface in log evidence Notes.
 var logFieldAllowlist = []string{
-	"body", "severity_text", "trace_id", "span_id",
+	"body", "severity_text", "trace_id", "span_id", "service.version", "deploy.id", "_timestamp",
 }
 
 func (s *MCPEvidenceSource) gatherTraces(ctx context.Context, inc Incident, start, end int64) ([]notify.Evidence, string) {
@@ -328,10 +331,14 @@ func (s *MCPEvidenceSource) spanEvidence(kind notify.EvidenceKind, record map[st
 
 func (s *MCPEvidenceSource) logEvidence(record map[string]any, inc Incident) notify.Evidence {
 	fields := SanitizeFields(record, logFieldAllowlist)
+	timestamp, _ := time.Parse(time.RFC3339Nano, fields["_timestamp"])
 	return notify.Evidence{
-		Kind:       notify.EvidenceKindLog,
-		SignozLink: s.recordLink(record, inc),
-		Note:       SanitizeNote(formatLogNote(fields)),
+		Kind:          notify.EvidenceKindLog,
+		SignozLink:    s.recordLink(record, inc),
+		Note:          SanitizeNote(formatLogNote(fields)),
+		Timestamp:     timestamp,
+		DeployVersion: fields["service.version"],
+		DeployID:      fields["deploy.id"],
 	}
 }
 

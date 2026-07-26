@@ -83,6 +83,11 @@ const (
 type Decision struct {
 	Kind   DecisionKind
 	UserID string
+	// Authorization records the click-time policy verdict for audit and
+	// rehydration. It is a string to keep the session package independent of
+	// the Slack adapter's policy types.
+	Authorization     string
+	AuthorizationRole string
 	// Note is any free text that accompanied the decision.
 	Note string
 	At   time.Time

@@ -1,6 +1,11 @@
 package slack
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+)
 
 // Actuator executes (or, in the advisory MVP, records) an approved
 // remediation proposal (PRD sections 15, 18). Declared here, consumer
@@ -24,6 +29,64 @@ type ActionRequest struct {
 	// labeled and, in an executing adapter, would demand stronger
 	// confirmation before it runs (PRD section 15).
 	Reversible bool
+	Mutation   *MutationRequest
+}
+
+type MutationKind string
+
+const (
+	MutationCreateDashboard MutationKind = "create_dashboard"
+	MutationUpdateBurn      MutationKind = "update_burn_threshold"
+	MutationSilenceAlert    MutationKind = "silence_alert"
+	MutationEnableAlert     MutationKind = "enable_alert"
+	MutationDisableAlert    MutationKind = "disable_alert"
+)
+
+// MutationRequest is the closed, typed allowlist boundary. There is no raw
+// HTTP method, URL, or arbitrary SigNoz payload here for an LLM to construct.
+type MutationRequest struct {
+	Kind          MutationKind
+	Name          string
+	SLO           string
+	Tier          string
+	NewMultiplier float64
+	Duration      time.Duration
+	ManagedBy     string
+	Before        string
+	After         string
+}
+
+func (m MutationRequest) Validate() error {
+	if strings.TrimSpace(m.ManagedBy) != "signoz-sre-sidekick" {
+		return fmt.Errorf("mutation target is not managed by the sidekick")
+	}
+	switch m.Kind {
+	case MutationCreateDashboard:
+		if strings.TrimSpace(m.Name) == "" {
+			return fmt.Errorf("mutation %s requires a target name", m.Kind)
+		}
+	case MutationUpdateBurn:
+		if strings.TrimSpace(m.SLO) == "" || strings.TrimSpace(m.Tier) == "" {
+			return fmt.Errorf("mutation %s requires slo and tier", m.Kind)
+		}
+		if m.NewMultiplier <= 0 || m.NewMultiplier > 1000 {
+			return fmt.Errorf("burn threshold must be between 0 and 1000")
+		}
+	case MutationSilenceAlert:
+		if strings.TrimSpace(m.Name) == "" {
+			return fmt.Errorf("mutation %s requires a target name", m.Kind)
+		}
+		if m.Duration <= 0 {
+			return fmt.Errorf("silence duration must be positive")
+		}
+	case MutationEnableAlert, MutationDisableAlert:
+		if strings.TrimSpace(m.Name) == "" {
+			return fmt.Errorf("mutation %s requires a target name", m.Kind)
+		}
+	default:
+		return fmt.Errorf("mutation %q is not allowlisted", m.Kind)
+	}
+	return nil
 }
 
 // ActionResult is what the Actuator did (or recorded) with the proposal.

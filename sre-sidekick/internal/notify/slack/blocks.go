@@ -145,6 +145,9 @@ func groundingBlock(g notify.Grounding, window string) slack.Block {
 		markdownText("*Telemetry trusted*\n" + trusted),
 		markdownText("*Window*\n" + escape(fallback(window, "unknown"))),
 	}
+	if deploy := g.RecentDeploy.Summary(); deploy != "" {
+		fields = append(fields, markdownText("*Recent deploy*\n"+escape(deploy)))
+	}
 	return slack.NewSectionBlock(nil, fields, nil)
 }
 

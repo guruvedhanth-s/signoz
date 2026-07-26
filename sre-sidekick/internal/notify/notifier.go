@@ -13,6 +13,8 @@ package notify
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -51,7 +53,50 @@ type Grounding struct {
 	// TelemetryTrusted reports whether the completeness gate trusted the
 	// telemetry for this window. When false, diagnosis must be
 	// StatusIndeterminate.
-	TelemetryTrusted bool `json:"telemetryTrusted"`
+	TelemetryTrusted bool               `json:"telemetryTrusted"`
+	RecentDeploy     *DeployCorrelation `json:"recentDeploy,omitempty"`
+}
+
+type DeployCorrelation struct {
+	Candidates   []DeployCandidate `json:"candidates,omitempty"`
+	ExplicitNone bool              `json:"explicitNone"`
+}
+
+type DeployCandidate struct {
+	Version  string        `json:"version,omitempty"`
+	DeployID string        `json:"deployId,omitempty"`
+	At       time.Time     `json:"at"`
+	Gap      time.Duration `json:"gap"`
+}
+
+type DeployEvent struct {
+	Version  string    `json:"version,omitempty"`
+	DeployID string    `json:"deployId,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+func (d *DeployCorrelation) Summary() string {
+	if d == nil {
+		return ""
+	}
+	if len(d.Candidates) == 0 {
+		if d.ExplicitNone {
+			return "No recent deploy in the incident window."
+		}
+		return ""
+	}
+	parts := make([]string, 0, len(d.Candidates))
+	for _, candidate := range d.Candidates {
+		label := candidate.Version
+		if label == "" {
+			label = candidate.DeployID
+		}
+		if label == "" {
+			label = "unidentified version"
+		}
+		parts = append(parts, fmt.Sprintf("%s, %s before onset", label, candidate.Gap.Round(time.Second)))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // EvidenceKind identifies the signal type behind an Evidence entry.
@@ -71,10 +116,13 @@ type Evidence struct {
 	// RootCause and each Candidate cite evidence by ID (EvidenceIDs); a
 	// cited id must resolve to an entry here (PRD section 13.4: the agent
 	// must cite the evidence it used).
-	ID         string       `json:"id"`
-	Kind       EvidenceKind `json:"kind"`
-	SignozLink string       `json:"signozLink"`
-	Note       string       `json:"note"`
+	ID            string       `json:"id"`
+	Kind          EvidenceKind `json:"kind"`
+	SignozLink    string       `json:"signozLink"`
+	Note          string       `json:"note"`
+	Timestamp     time.Time    `json:"timestamp,omitempty"`
+	DeployVersion string       `json:"deployVersion,omitempty"`
+	DeployID      string       `json:"deployId,omitempty"`
 }
 
 // Candidate is one ranked hypothesis for the root cause. Used instead of

@@ -40,4 +40,8 @@ type Incident struct {
 	// The RCA agent only reads and forwards these; it never sets or alters
 	// them.
 	Grounding notify.Grounding
+	// DeployEvents are explicit version/deploy markers discovered from
+	// telemetry. They are correlated deterministically before reasoning.
+	DeployEvents             []notify.DeployEvent
+	DeployCorrelationEnabled bool
 }

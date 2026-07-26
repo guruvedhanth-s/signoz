@@ -3,6 +3,7 @@ package rca
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
@@ -58,13 +59,14 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 	}
 
 	incident := Incident{
-		CorrelationID: fmt.Sprintf("slack-%s-%s-%d", req.Service, req.Environment, a.now().UnixNano()),
-		Service:       req.Service,
-		Environment:   req.Environment,
-		Window:        window,
-		SLO:           sloName,
-		Alert:         req.Alert,
-		Grounding:     grounding,
+		CorrelationID:            fmt.Sprintf("slack-%s-%s-%d", req.Service, req.Environment, a.now().UnixNano()),
+		Service:                  req.Service,
+		Environment:              req.Environment,
+		Window:                   window,
+		SLO:                      sloName,
+		Alert:                    req.Alert,
+		Grounding:                grounding,
+		DeployCorrelationEnabled: true,
 	}
 	return a.Agent.Diagnose(ctx, incident)
 }
@@ -75,6 +77,12 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 // fabricating one when the reasoner is not the real thing.
 func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupRequest) (string, error) {
 	ctx = limits.WithIdentity(ctx, req.AskedBy, req.ChannelID)
+	if isWhatChangedIntent(req.Question) {
+		if summary := req.Diagnosis.Grounding.RecentDeploy.Summary(); summary != "" {
+			return summary, nil
+		}
+		return "No deploy correlation is available for this incident.", nil
+	}
 	reasoner, ok := a.Agent.Reasoner.(*LLMReasoner)
 	if !ok {
 		return "", fmt.Errorf("rca: follow-up questions require the live LLM reasoner")
@@ -97,6 +105,11 @@ func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupReq
 		History:       history,
 		Question:      req.Question,
 	})
+}
+
+func isWhatChangedIntent(question string) bool {
+	question = strings.ToLower(strings.TrimSpace(question))
+	return strings.Contains(question, "what changed") || strings.Contains(question, "what was deployed")
 }
 
 // Verify keeps the deterministic recovery check behind the RCA boundary.
