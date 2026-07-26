@@ -150,6 +150,7 @@ type SlackConfig struct {
 	SessionStorePath string              `yaml:"session_store_path" json:"session_store_path"`
 	AuditLogPath     string              `yaml:"audit_log_path" json:"audit_log_path"`
 	Authorization    AuthorizationConfig `yaml:"authorization" json:"authorization"`
+	EnableMutations  bool                `yaml:"enable_mutations" json:"enable_mutations"`
 }
 
 // AuthorizationConfig defines the Slack users and user groups allowed to

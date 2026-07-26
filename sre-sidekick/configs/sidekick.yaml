@@ -40,6 +40,8 @@ notify:
     # Optional durable local session snapshots. Leave empty for memory mode.
     session_store_path: ""
     audit_log_path: ""
+    # Mutation execution is disabled unless explicitly enabled and a backend is attached.
+    enable_mutations: false
     # Mutation execution is opt-in and remains disabled by default.
     # Optional click-time authorization. With no users/groups configured,
     # advisory MVP behavior remains permissive. Operators also count as
