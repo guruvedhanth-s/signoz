@@ -38,6 +38,8 @@ type FollowupContext struct {
 	ExtraEvidence []notify.Evidence
 	History       []FollowupTurn
 	Question      string
+	UserID        string
+	ChannelID     string
 }
 
 // AnswerFollowup answers one human question about an already-diagnosed

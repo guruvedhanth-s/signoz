@@ -13,6 +13,7 @@ import (
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mcp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 )
 
 // LLMReasoner is the M4 real reasoner: it turns grounded facts and gathered
@@ -46,6 +47,10 @@ import (
 // so the model can pull additional live evidence during reasoning, bounded
 // by MaxToolCalls so a single Reason call cannot run away.
 type LLMReasoner struct {
+	// Limits is shared by diagnoses and follow-ups when the same reasoner is
+	// used by watch. Nil preserves the unbounded legacy behavior for callers
+	// that explicitly construct a reasoner in tests.
+	Limits *limits.Manager
 	// APIKey is the OpenRouter API key (OPENROUTER_API_KEY). Required;
 	// Reason returns an error immediately if it is empty rather than
 	// silently falling back to anything.
@@ -347,7 +352,19 @@ func jsonEscape(s string) string {
 
 // complete performs one chat-completions request and returns the first
 // choice.
-func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allowTools bool) (chatChoice, error) {
+func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allowTools bool) (choice chatChoice, err error) {
+	if r.Limits != nil {
+		req := limits.Identity(ctx)
+		req.EstimatedTokens = r.maxTokens()
+		if err := r.Limits.Allow(ctx, req); err != nil {
+			return chatChoice{}, err
+		}
+	}
+	defer func() {
+		if err != nil && r.Limits != nil {
+			r.Limits.RecordFailure()
+		}
+	}()
 	req := chatCompletionRequest{
 		Model:       r.Model,
 		Messages:    messages,
@@ -393,6 +410,10 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 	}
 	if len(parsed.Choices) == 0 {
 		return chatChoice{}, fmt.Errorf("rca: LLM returned no choices")
+	}
+	if r.Limits != nil {
+		r.Limits.Reconcile(r.maxTokens(), parsed.Usage.TotalTokens)
+		r.Limits.RecordSuccess()
 	}
 	return parsed.Choices[0], nil
 }
@@ -502,7 +523,12 @@ type chatChoice struct {
 
 type chatCompletionResponse struct {
 	Choices []chatChoice `json:"choices"`
-	Error   *struct {
+	Usage   struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }

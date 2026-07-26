@@ -62,6 +62,7 @@ type DiagnoseRequest struct {
 // E13).
 type FollowupRequest struct {
 	CorrelationID string
+	ChannelID     string
 	Service       string
 	Environment   string
 	Window        string
@@ -133,6 +134,7 @@ func followupRequest(s *session.Session, question, askedBy string) FollowupReque
 
 	return FollowupRequest{
 		CorrelationID: view.CorrelationID,
+		ChannelID:     view.ChannelID,
 		Service:       view.Service,
 		Environment:   view.Environment,
 		Window:        view.Window,

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -125,7 +126,53 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 	if err != nil {
 		return err
 	}
-	sessions := session.NewManager(session.WithTTL(ttl))
+	managerOptions := []session.ManagerOption{session.WithTTL(ttl)}
+	var durableStore session.Store
+	if strings.EqualFold(fullCfg.Storage.Driver, "postgres") {
+		dsn := fullCfg.Storage.URL
+		if fullCfg.Storage.URLEnv != "" {
+			dsn = os.Getenv(fullCfg.Storage.URLEnv)
+		}
+		store, storeErr := session.NewPostgresStore(context.Background(), dsn)
+		if storeErr != nil {
+			return fmt.Errorf("postgres session store: %w", storeErr)
+		}
+		durableStore = store
+	} else if strings.EqualFold(fullCfg.Storage.Driver, "file") {
+		path := strings.TrimSpace(cfg.SessionStorePath)
+		if path == "" {
+			return fmt.Errorf("file session store requires notify.slack.session_store_path")
+		}
+		store, storeErr := session.NewFileStore(path)
+		if storeErr != nil {
+			return fmt.Errorf("session store: %w", storeErr)
+		}
+		durableStore = store
+	}
+	if durableStore != nil {
+		managerOptions = append(managerOptions, session.WithStore(durableStore))
+	}
+	if durableStore == nil && strings.TrimSpace(cfg.SessionStorePath) != "" {
+		store, storeErr := session.NewFileStore(strings.TrimSpace(cfg.SessionStorePath))
+		if storeErr != nil {
+			return fmt.Errorf("session store: %w", storeErr)
+		}
+		managerOptions = append(managerOptions, session.WithStore(store))
+	}
+	sessions := session.NewManager(managerOptions...)
+	var auditor session.Auditor
+	if path := strings.TrimSpace(cfg.AuditLogPath); path != "" {
+		fileAuditor, auditErr := session.NewFileAuditor(path)
+		if auditErr != nil {
+			return fmt.Errorf("audit log: %w", auditErr)
+		}
+		auditor = fileAuditor
+	}
+	if auditor == nil {
+		if postgres, ok := durableStore.(*session.PostgresStore); ok {
+			auditor = postgres.Auditor()
+		}
+	}
 
 	// buildRCAAgent preflights the OpenRouter reasoner (and the MCP server,
 	// when configured) at startup, same as `diagnose` - a missing dependency
@@ -149,6 +196,7 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
 		sidekickslack.WithCoordinatorMetrics(metrics),
 		sidekickslack.WithCoordinatorActuator(actuator),
+		sidekickslack.WithCoordinatorAuditor(auditor),
 	)
 	if err != nil {
 		return err

@@ -10,6 +10,12 @@
 #   export SLACK_APP_TOKEN=xapp-...
 #   export OPENROUTER_API_KEY=sk-or-...
 
+storage:
+  # memory, file, or postgres. Postgres uses url_env to keep credentials out
+  # of this file; memory is the safe default for local development.
+  driver: memory
+  url_env: SIDEKICK_DATABASE_URL
+
 notify:
   slack:
     # Env var holding the Slack bot token (xoxb-...), used for outbound calls
@@ -31,6 +37,9 @@ notify:
     # Cap on concurrent diagnose runs, so an alert storm cannot launch
     # unbounded LLM/MCP work.
     max_concurrent_rca: 5
+    # Optional durable local session snapshots. Leave empty for memory mode.
+    session_store_path: ""
+    audit_log_path: ""
 
 # llm configures the provider driving the RCA reasoner (PRD section 21
 # decision 3: OpenRouter/DeepSeek, kept swappable behind one interface).
@@ -41,6 +50,18 @@ llm:
   model: deepseek/deepseek-chat
   # Env var holding the OpenRouter API key. Never stored here or in YAML.
   api_key_env: OPENROUTER_API_KEY
+  # Shared diagnosis and follow-up protection. Zero values use safe defaults.
+  limits:
+    max_tokens_per_request: 4000
+    hourly_requests: 100
+    hourly_tokens: 100000
+    daily_requests: 1000
+    daily_tokens: 500000
+    per_user_requests: 10
+    per_channel_requests: 30
+    rate_window: 1m
+    failure_threshold: 5
+    cooldown: 1m
 
 # presentation configures the RCA agent's rule-based presentation engine
 # (PRD section 13.4, internal/rca/presentation.go). These thresholds decide,

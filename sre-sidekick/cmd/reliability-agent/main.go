@@ -25,6 +25,7 @@ import (
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/otlp"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/profile"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/registry"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/slo"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source/signoz"
@@ -340,12 +341,30 @@ func buildRCAAgent(ctx context.Context, cfg rcaConfig) (*rca.Agent, *signoz.Clie
 	if err != nil {
 		return nil, nil, fmt.Errorf("rca: %w", err)
 	}
+	limitCfg := limits.Config{MaxTokensPerRequest: cfg.LLM.Limits.MaxTokensPerRequest,
+		HourlyRequests: cfg.LLM.Limits.HourlyRequests, HourlyTokens: cfg.LLM.Limits.HourlyTokens,
+		DailyRequests: cfg.LLM.Limits.DailyRequests, DailyTokens: cfg.LLM.Limits.DailyTokens,
+		PerUserRequests: cfg.LLM.Limits.PerUserRequests, PerChannelRequests: cfg.LLM.Limits.PerChannelRequests,
+		FailureThreshold: cfg.LLM.Limits.FailureThreshold}
+	if cfg.LLM.Limits.RateWindow != "" {
+		limitCfg.RateWindow, err = time.ParseDuration(cfg.LLM.Limits.RateWindow)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rca: invalid llm rate_window: %w", err)
+		}
+	}
+	if cfg.LLM.Limits.Cooldown != "" {
+		limitCfg.Cooldown, err = time.ParseDuration(cfg.LLM.Limits.Cooldown)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rca: invalid llm cooldown: %w", err)
+		}
+	}
 	agent.Reasoner = &rca.LLMReasoner{
 		APIKey:      llmAPIKey,
 		Model:       cfg.LLM.Model,
 		BaseURL:     cfg.LLM.BaseURL,
 		Tools:       toolCaller,
 		ToolSchemas: toolSchemas,
+		Limits:      limits.New(limitCfg),
 	}
 
 	return agent, client, nil
