@@ -1,0 +1,73 @@
+name: demo-app-ci
+
+# demo-app is a third Go module in this repo (its own go.mod under demo-app/),
+# alongside the root module and sre-sidekick/. It is therefore covered by
+# neither goci.yaml (root module only, and gated on
+# `! github.event.pull_request.head.repo.fork`, which is always true here
+# because this repo is itself a fork - so no PR here ever ran it) nor
+# sre-sidekick-ci.yaml (path-filtered to sre-sidekick/**).
+#
+# Without this workflow the module's tests - including the concurrency test
+# covering the fault-controller access pattern that a review found a data race
+# in - would only ever run on a developer's machine.
+#
+# Deliberately mirrors sre-sidekick-ci.yaml rather than inventing a second
+# shape: same Go version, same jobs, same reasons.
+
+on:
+  pull_request:
+    paths:
+      - "demo-app/**"
+      - ".github/workflows/demo-app-ci.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - "demo-app/**"
+      - ".github/workflows/demo-app-ci.yaml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo-app
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: demo-app/go.sum
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        # -race matters more here than anywhere else in the repo: the fault
+        # controller is written by HTTP handlers and read by every request
+        # goroutine, and the log emitter ships records from a worker pool.
+        run: go test ./... -race
+
+  fmt:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo-app
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: demo-app/go.sum
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "the following files are not gofmt'd:"
+            echo "$out"
+            exit 1
+          fi
