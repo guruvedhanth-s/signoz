@@ -132,6 +132,12 @@ func (h *recordingHandler) counts() (int, int, int) {
 	return len(h.messages), len(h.interactions), len(h.commands)
 }
 
+func (h *recordingHandler) mentionCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.mentions)
+}
+
 // startReceiver runs a receiver over a channel the test controls.
 func startReceiver(t *testing.T, handler Handler, opts ...ReceiverOption) (
 	chan socketmode.Event, *recordingAcker, *syncBuffer, func(),
@@ -170,6 +176,25 @@ func startReceiver(t *testing.T, handler Handler, opts ...ReceiverOption) (
 
 func messageEvent(envelopeID, eventID, text string) socketmode.Event {
 	inner := &slackevents.MessageEvent{
+		Channel:         "C1",
+		ThreadTimeStamp: "1720000000.0001",
+		TimeStamp:       "1720000100.0002",
+		User:            "U1",
+		Text:            text,
+	}
+	return socketmode.Event{
+		Type: socketmode.EventTypeEventsAPI,
+		Data: slackevents.EventsAPIEvent{
+			TeamID:     "T1",
+			Data:       slackevents.EventsAPICallbackEvent{EventID: eventID},
+			InnerEvent: slackevents.EventsAPIInnerEvent{Data: inner},
+		},
+		Request: &socketmode.Request{EnvelopeID: envelopeID},
+	}
+}
+
+func appMentionEvent(envelopeID, eventID, text string) socketmode.Event {
+	inner := &slackevents.AppMentionEvent{
 		Channel:         "C1",
 		ThreadTimeStamp: "1720000000.0001",
 		TimeStamp:       "1720000100.0002",
@@ -246,6 +271,58 @@ func TestMessageIsAckedAndDispatched(t *testing.T) {
 	}
 	if !got.InThread() {
 		t.Error("threaded reply was not recognised as in-thread")
+	}
+}
+
+func TestAppMentionIsDispatched(t *testing.T) {
+	handler := newRecordingHandler()
+	events, _, _, _ := startReceiver(t, handler)
+
+	events <- appMentionEvent("env-mention", "Ev-mention", "<@USIDEKICK> how is checkout doing?")
+	handler.waitFor(t, 1)
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	got := handler.mentions[0]
+	if got.Text != "how is checkout doing?" {
+		t.Errorf("text = %q", got.Text)
+	}
+	if got.ChannelID != "C1" || got.ThreadTS != "1720000000.0001" {
+		t.Errorf("session key = %s/%s", got.ChannelID, got.ThreadTS)
+	}
+}
+
+func TestPlainMessageAddressedToAnotherUserIsNotMention(t *testing.T) {
+	handler := newRecordingHandler()
+	events, _, _, _ := startReceiver(t, handler)
+
+	events <- messageEvent("env-alice", "Ev-alice", "<@UALICE> can you check the checkout deploy?")
+	handler.waitFor(t, 1)
+
+	messages, _, _ := handler.counts()
+	if messages != 1 {
+		t.Errorf("messages = %d, want 1", messages)
+	}
+	if mentions := handler.mentionCount(); mentions != 0 {
+		t.Errorf("mentions = %d, want 0", mentions)
+	}
+}
+
+func TestAppMentionAndMessageDeliveryProduceOneTurn(t *testing.T) {
+	handler := newRecordingHandler()
+	events, _, logs, _ := startReceiver(t, handler)
+
+	events <- appMentionEvent("env-mention", "Ev-mention", "<@USIDEKICK> how is checkout doing?")
+	events <- messageEvent("env-message", "Ev-message", "<@USIDEKICK> how is checkout doing?")
+	handler.waitFor(t, 1)
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "duplicate") })
+
+	messages, _, _ := handler.counts()
+	if messages != 0 {
+		t.Errorf("messages = %d, want 0", messages)
+	}
+	if mentions := handler.mentionCount(); mentions != 1 {
+		t.Errorf("mentions = %d, want 1", mentions)
 	}
 }
 

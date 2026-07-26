@@ -61,7 +61,7 @@ type Mention struct {
 	MessageTS string
 	UserID    string
 	// Text is the question with the leading <@BOTID> handle removed.
-	Text string
+	Text   string
 	TeamID string
 	// DirectMessage marks a message in a DM conversation, where there is no
 	// handle to strip and no channel context to scope by.
@@ -165,14 +165,14 @@ func messageFrom(event slackevents.EventsAPIEvent, eventID string) (Message, boo
 	}
 
 	return Message{
-		EventID:   eventID,
+		EventID:     eventID,
 		ChannelType: inner.ChannelType,
-		ChannelID: inner.Channel,
-		ThreadTS:  inner.ThreadTimeStamp,
-		MessageTS: inner.TimeStamp,
-		UserID:    inner.User,
-		Text:      inner.Text,
-		TeamID:    event.TeamID,
+		ChannelID:   inner.Channel,
+		ThreadTS:    inner.ThreadTimeStamp,
+		MessageTS:   inner.TimeStamp,
+		UserID:      inner.User,
+		Text:        inner.Text,
+		TeamID:      event.TeamID,
 		// A message is from a bot when Slack tags it with a bot id or the
 		// bot_message subtype. Either marker is enough.
 		FromBot: strings.TrimSpace(inner.BotID) != "" || inner.SubType == "bot_message",

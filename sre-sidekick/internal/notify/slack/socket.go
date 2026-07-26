@@ -329,21 +329,13 @@ func (r *Receiver) decode(event socketmode.Event) (job, bool) {
 			// handle to look for and no unrelated conversation to barge into.
 			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
 		}
-		if stripped := stripHandle(msg.Text); stripped != msg.Text {
-			// Slack may deliver the same human turn as both app_mention and
-			// message. Turn-keying only the addressed message path keeps that
-			// one question to one answer without collapsing ordinary messages
-			// that happen to share a timestamp in tests or replays.
-			mention := Mention{
-				TurnID:    turnID(msg.ChannelID, msg.MessageTS, msg.UserID),
-				ChannelID: msg.ChannelID,
-				ThreadTS:  msg.ThreadTS,
-				MessageTS: msg.MessageTS,
-				UserID:    msg.UserID,
-				Text:      stripped,
-				TeamID:    msg.TeamID,
-			}
-			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
+		if stripHandle(msg.Text) != msg.Text {
+			// A leading handle on a plain message is not enough to decide the
+			// sidekick was addressed: it might be @alice. Keep it a Message,
+			// but key it by turn so the paired app_mention delivery for
+			// @sidekick is collapsed before it can answer twice in a session
+			// thread.
+			return job{kind: "message", id: turnID(msg.ChannelID, msg.MessageTS, msg.UserID), message: &msg}, true
 		}
 		return job{kind: "message", id: eventID(apiEvent, event.Request), message: &msg}, true
 
