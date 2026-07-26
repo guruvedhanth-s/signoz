@@ -575,3 +575,15 @@ func equalJSON[T any](t *testing.T, a, b T) bool {
 	}
 	return string(left) == string(right)
 }
+
+// memoryTelemetry supplies a snapshot good enough for telemetry_trust to
+// produce a real audit report in composer tests.
+func memoryTelemetry() source.TelemetrySource {
+	return source.MemorySource{Data: evidence.Snapshot{
+		QueryComplete: true,
+		Traces: []evidence.Record{
+			{Fields: map[string]any{"service.name": "checkout-api"}},
+			{Fields: map[string]any{"other": "x"}},
+		},
+	}}
+}

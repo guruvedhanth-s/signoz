@@ -3,6 +3,7 @@ package answer
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // defaultIncidentLimit bounds an unspecified history request. Small on
@@ -44,8 +45,12 @@ func RecentIncidentsTool(deps Deps) Tool[HistoryArgs, RecentIncidents] {
 			if err != nil {
 				return Envelope[RecentIncidents]{}, fmt.Errorf("answer: read incident history: %w", err)
 			}
+			start, end := recentIncidentRange(incidents)
 			return Envelope[RecentIncidents]{
-				Status: StatusOK,
+				Status:         StatusOK,
+				Window:         fmt.Sprintf("last %d incidents", limit),
+				EvaluatedStart: start,
+				EvaluatedEnd:   end,
 				Data: RecentIncidents{
 					Service:     args.Service,
 					Environment: args.Environment,
@@ -53,4 +58,24 @@ func RecentIncidentsTool(deps Deps) Tool[HistoryArgs, RecentIncidents] {
 				},
 			}, nil
 		})
+}
+
+func recentIncidentRange(incidents []Incident) (time.Time, time.Time) {
+	var start, end time.Time
+	for _, incident := range incidents {
+		opened := incident.OpenedAt.UTC()
+		if opened.IsZero() {
+			continue
+		}
+		if start.IsZero() || opened.Before(start) {
+			start = opened
+		}
+		if opened.After(end) {
+			end = opened
+		}
+		if !incident.ResolvedAt.IsZero() && incident.ResolvedAt.UTC().After(end) {
+			end = incident.ResolvedAt.UTC()
+		}
+	}
+	return start, end
 }

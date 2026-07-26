@@ -128,7 +128,7 @@ func TelemetryTrustTool(deps Deps) Tool[ServiceArgs, TelemetryTrust] {
 
 			result := Envelope[TelemetryTrust]{
 				Status:         StatusOK,
-				Window:         lookback.String(),
+				Window:         formatWindow(lookback),
 				EvaluatedStart: start,
 				EvaluatedEnd:   now,
 				Trust:          trust,
