@@ -1,19 +1,44 @@
 # SRE Sidekick Reliability Agent
 
-The Reliability Agent audits whether an application's telemetry is trustworthy
-and then evaluates reliability objectives using that trusted telemetry.
+An AI SRE agent grounded on SigNoz. It audits whether an application's telemetry
+is trustworthy, evaluates reliability objectives against that trusted telemetry,
+diagnoses incidents over live traces and logs, and brings the result to a human
+in Slack for a decision.
 
-It separates two questions that are commonly mixed together:
+**To run it locally, follow [PLAYBOOK.md](PLAYBOOK.md).** This file explains what
+it is and how each part works.
+
+It is organised around four tracks:
 
 1. **Track A — Telemetry quality:** Are the logs, traces, and metrics complete,
    fresh, correctly structured, and safe to use?
 2. **Track B — Service reliability:** Does the service meet its SLO, and what is
    its remaining error budget and burn rate?
+3. **Track C — Root cause:** Given trustworthy telemetry, what actually broke?
+   Evidence is gathered over the SigNoz MCP server and reasoned about by an LLM.
+4. **Track D — Interface and action:** A Slack adapter that delivers grounded
+   diagnoses, answers questions, and takes a human decision before anything is
+   applied.
 
 Track A never decides whether an application SLO passed. It only determines
 whether the available telemetry is reliable enough to support that decision.
 When evidence is unavailable or incomplete, the agent returns
 `indeterminate` rather than inventing a healthy or unhealthy result.
+
+## Two rules the whole system is built on
+
+Everything else is an implementation detail; these two are the product.
+
+**The AI never computes a number.** SLO state, SLI, error budget, burn rate and
+telemetry trust are computed by the deterministic engine. The model explains
+them and never produces them - not in a diagnosis, not in a chat answer. The
+reasoner is not even called when telemetry is untrusted, which
+`TestAgent_Diagnose_UntrustedTelemetry_NeverReachesReasoner` enforces.
+
+**It refuses rather than guesses.** If the completeness gate does not trust the
+telemetry, or the evidence gate finds too little to reason over, the answer is
+`indeterminate` with a stated reason. A confident wrong answer about reliability
+is worse than no answer, and this system is designed to prefer the latter.
 
 ## How it works
 
@@ -26,18 +51,33 @@ flowchart LR
     TrackA["Track A audit"]
     Gate["Telemetry readiness gate"]
     SLO["Track B SLO evaluation"]
-    Output["Reports, alerts, and webhooks"]
+    Alert["SigNoz burn-rate alert"]
+    RCA["Track C RCA over MCP"]
+    Evidence["Evidence gate"]
+    Slack["Track D Slack: diagnosis, decision, verify"]
+    Output["Metrics, dashboards, and alerts written back"]
+    Indeterminate["indeterminate"]
 
     Application --> Collector
     Collector --> SigNoz
-    SigNoz --> TrackA
     Profile --> TrackA
+    SigNoz --> TrackA
     TrackA --> Gate
     Gate -->|"trusted"| SLO
-    Gate -->|"incomplete"| Indeterminate["indeterminate"]
+    Gate -->|"incomplete"| Indeterminate
+    SLO --> Alert
     SLO --> Output
     TrackA --> Output
+    Alert --> RCA
+    RCA --> Evidence
+    Evidence -->|"sufficient"| Slack
+    Evidence -->|"too little"| Indeterminate
+    Slack -->|"human approves"| Slack
 ```
+
+Read the two `indeterminate` edges as the point rather than as error handling.
+Untrusted telemetry never reaches the SLO decision, and thin evidence never
+reaches the reasoner.
 
 Each service supplies its own telemetry profile and SLO configuration. This
 allows a normal backend, AI agent, worker, or custom application to use
@@ -187,24 +227,108 @@ Examples:
 If required metrics are missing, partial, unauthorized, or unavailable, Track B
 returns `indeterminate` instead of treating missing data as zero.
 
-## Prerequisites
+## Track C: root cause
 
-- Go
-- a running SigNoz backend, normally `http://localhost:8080`;
-- an OpenTelemetry Collector accepting logs on
-  `http://localhost:4318/v1/logs`;
-- a SigNoz service-account API key with the built-in Viewer role.
+Once Track A trusts the telemetry and Track B says the SLO is burning, Track C
+answers *why*. It gathers evidence over the **SigNoz MCP server** - failing
+trace trees, exception logs, error concentration - and hands it to an LLM
+(DeepSeek via OpenRouter) to explain.
 
-Export the local connection details:
+Three gates stand between an incident and an answer:
+
+- **The completeness gate** (Track B) must trust the telemetry for the window.
+- **The evidence gate** must find enough to reason over: logs, error spans, or
+  exceptions. Too little, and the result is `indeterminate` with a reason.
+- **The presentation rules** decide the *shape* of the answer deterministically,
+  from thresholds in `configs/sidekick.yaml` - never from the model's own
+  confidence. Enough supported golden signals produce a single conclusion; fewer
+  produce ranked hypotheses; too few samples produce "could not determine".
+
+Evidence text is treated as hostile input. Log bodies and span attributes are
+written by the instrumented application and everything it talks to, so
+`internal/rca/sanitize.go` allowlists fields, redacts secret-shaped values,
+strips control characters, and caps length before any of it reaches a prompt.
 
 ```bash
-export SIGNOZ_URL='http://localhost:8080'
-export SIGNOZ_API_KEY='YOUR_SERVICE_ACCOUNT_KEY'
+go run ./cmd/reliability-agent diagnose \
+  --service checkout-api --environment local --window 10m \
+  --slo-config examples/demo-checkout-slo.yaml
 ```
 
-Do not commit the API key.
+## Track D: Slack, questions, and decisions
 
-## Demo agent: a live, controllable support-agent workload
+`watch` runs the Slack adapter and the alert receiver together.
+
+**Incidents.** A SigNoz alert reaches the webhook, the agent grounds and
+diagnoses, and posts one message per incident: grounding fields, root cause or
+ranked hypotheses, evidence deep links, an advisory action, and Approve /
+Decline / Close buttons. One incident is one thread, and that thread is the
+session.
+
+**Questions.** Mention the bot and ask in plain English:
+
+```
+@sidekick how is checkout-api doing?
+@sidekick what's my burn rate?
+```
+
+Questions resolve to a closed set of intents, each backed by a deterministic
+function in `internal/answer` - `slo_status`, `burn_rate`, `error_budget`,
+`telemetry_trust`, `recent_incidents`, `service_inventory`. The model picks the
+intent and phrases the result; the numbers come from the engine. An unrecognised
+question returns a capability list rather than an improvised answer, and with no
+LLM configured the answers still work from deterministic templates.
+
+**Decisions.** Approving records the decision and runs the actuator, which is
+advisory by default: it logs the proposal and reports that a human must apply
+it. **Verify recovery** re-evaluates the SLO deterministically and reports
+whether it actually recovered - it will say "not recovered" rather than confirm
+a fix that has not landed.
+
+**Mutations** (changing things in SigNoz from chat) are a typed allowlist in
+`internal/mutation` with a before/after diff and button confirmation. They are
+**disabled by default** and should stay disabled until `authorization` is
+configured, because otherwise any channel member can approve one.
+
+## Cost, limits, and storage
+
+- `llm.limits` bounds tokens and requests per request, per hour, per day, and
+  per user or channel, with a circuit breaker for a failing provider. Exhausting
+  the budget degrades to deterministic templates and `indeterminate`, never to
+  silence.
+- `storage.driver` selects `memory` (default), `file`, or `postgres`. In memory
+  mode a restart loses open sessions - the bot says so rather than pretending.
+
+## Prerequisites
+
+See **[PLAYBOOK.md](PLAYBOOK.md)** for the full local setup, including the Slack
+app, MCP, and the demo application. In short:
+
+- Go 1.25+, Docker, and [`foundryctl`](https://github.com/SigNoz/foundry);
+- a running SigNoz with the MCP server enabled;
+- a SigNoz service-account API key;
+- Slack bot and app-level tokens, for Track D;
+- an OpenRouter API key, for Track C.
+
+Credentials are read from the environment and named in `configs/sidekick.yaml`
+by variable, never stored in it. Do not commit them.
+
+## Workloads to observe
+
+There are two, and they serve different purposes.
+
+**[`demo-app/`](../demo-app) is the primary one** and what you want for a demo or
+for validating a change: a browser frontend, a `checkout-api` backend, and a
+`payments` dependency, so a single trace spans all three and a fault in
+`payments` produces the diagnosis *"checkout is failing because payments is"*.
+Faults are injected from the UI, each with a rate. See its README, and
+[PLAYBOOK.md](PLAYBOOK.md) to run it.
+
+**`cmd/demo-agent`, below, is the zero-dependency one**: a single process, no
+HTTP surface, no browser. It is what CI and `preflight` use, and it stays the
+quickest way to put telemetry into SigNoz without running an application.
+
+### Demo agent: a live, controllable support-agent workload
 
 The repository includes `cmd/demo-agent`, a small program that emits
 realistic OpenTelemetry traces, metrics, and logs for a simulated AI support
@@ -224,7 +348,7 @@ Each loop iteration simulates one agent run and emits:
   `agent_grounded_answers_total` (only grounded, successful runs);
 - one log record correlated to that run's trace ID.
 
-### 1. Start the demo agent in healthy mode
+#### 1. Start the demo agent in healthy mode
 
 ```bash
 go run ./cmd/demo-agent
@@ -243,7 +367,7 @@ Ok status, `evaluation.grounded` is `true`, and both counters increment.
 Over time the grounded-answer SLI in `examples/support-agent-slo.yaml` stays
 healthy.
 
-### 2. Start automatic Track A auditing or Track B SLO evaluation
+#### 2. Start automatic Track A auditing or Track B SLO evaluation
 
 In another terminal, watch the correlated logs:
 
@@ -262,7 +386,7 @@ go run ./cmd/reliability-agent slo \
   --output json
 ```
 
-### 3. Switch to buggy mode
+#### 3. Switch to buggy mode
 
 Stop the healthy process and restart it with `--buggy`:
 
@@ -287,7 +411,7 @@ stay healthy.
 Use `--runs` to cap the number of simulated runs instead of running until
 interrupted, and `--interval` to control how often runs happen.
 
-### Webhook delivery
+#### Webhook delivery
 
 Console alerts can also be delivered to an HTTP endpoint:
 
@@ -419,48 +543,85 @@ make watch-logs
 ## Project structure
 
 ```text
-cmd/reliability-agent       Main server, audit-watch, and SLO CLI
-cmd/demo-agent              Traces+metrics+logs demo workload for support-agent
+cmd/reliability-agent       Every mode: preflight, audit, audit-watch, slo,
+                            generate, diagnose, watch, server
+cmd/demo-agent              Synthetic single-service workload (CI, preflight)
 examples                    Telemetry profiles and SLO configurations
+configs/sidekick.yaml       Slack, LLM, storage, limits, presentation rules
+
 internal/profile            Profile model and validation
 internal/evidence           Source-neutral telemetry snapshot
 internal/source             Telemetry source interface
-internal/source/signoz      SigNoz query and normalization adapters
+internal/source/signoz      SigNoz query, normalization, and management APIs
 internal/audit              Track A rule engine and scoring
 internal/monitor            Scheduled auditing and alert transitions
 internal/alerting           JSON and webhook alert delivery
 internal/slo                Track B SLI, SLO, budget, and burn-rate engine
+internal/otlp               Emits results back to SigNoz as OTLP metrics
+
+internal/mcp                SigNoz MCP client (the RCA read path)
+internal/rca                Track C: evidence gates, reasoner, presentation
+                            rules, grounding, sanitization
+internal/rca/limits         LLM budgets, rate limits, circuit breaker
+
+internal/notify             Notifier interface
+internal/notify/slack       Track D: client, Block Kit, coordinator, sessions,
+                            Socket Mode, authorization
+internal/answer             Deterministic tool surface behind chat answers
+internal/session            Incident sessions, TTL, and persistence
+internal/act                Actuator interface and the advisory adapter
+internal/mutation           Typed, gated SigNoz mutations
+internal/detect             Alert webhook receiver and dedup
+
 internal/api                HTTP API
-internal/registry           In-memory profile registry
+internal/registry           Profile registry
 ```
+
+The observed application lives outside this module, in
+[`demo-app/`](../demo-app) at the repo root: a browser frontend, a
+`checkout-api` backend, and a `payments` dependency, with fault sliders. It is
+what the profiles and SLO configs named `demo-checkout-*` describe.
 
 ## Current implementation status
 
+The whole loop - detect, ground, diagnose, communicate, act, verify - has been
+run end to end against a live, stock SigNoz, not only against test doubles.
+
 Implemented:
 
-- profile-driven telemetry contracts;
-- backend, worker, AI-agent, and custom data kinds;
-- Track A rule evaluation and scoring;
-- live SigNoz log querying and normalization;
-- live SigNoz trace and metrics querying and normalization;
-- scheduled log audits;
+- profile-driven telemetry contracts; backend, worker, AI-agent, and custom
+  data kinds;
+- Track A rule evaluation, scoring, and scheduled auditing over live logs,
+  traces, and metrics;
 - blocker debounce, duplicate suppression, and recovery alerts;
-- console and webhook alert delivery;
-- live SigNoz SLO queries;
-- OTLP emission of SLO and telemetry-quality metrics;
-- idempotent SigNoz dashboard, notification-channel, and burn-alert generation;
-- multi-window multi-burn-rate evaluation;
-- SLI, target, error-budget, and burn-rate calculations;
-- safe `indeterminate` handling;
-- unit and end-to-end demo coverage.
+- Track B SLI, target, error-budget, burn-rate, and multi-window multi-burn-rate
+  evaluation, with a completeness gate and safe `indeterminate` handling;
+- OTLP emission of SLO and telemetry-quality metrics, and idempotent generation
+  of the SigNoz dashboard, notification channel, and burn alerts;
+- Track C RCA over the MCP server with a real reasoner, evidence gating,
+  rule-based presentation, and prompt-injection sanitization;
+- Track D Slack: alert-driven diagnoses, Block Kit rendering, incident sessions,
+  approve/decline/close decisions, deterministic verify, mention-driven
+  question answering over a typed tool surface, click-time authorization, and
+  LLM cost limits;
+- deploy correlation, session persistence (`memory`, `file`, `postgres`), and
+  typed, gated SigNoz mutations;
+- unit, integration, and end-to-end coverage, race-clean in CI.
 
-Not yet implemented:
+Not yet implemented, and worth knowing before relying on it:
 
-- persistent profile, report, and alert storage;
-- automatic profile-to-PromQL planning for Track B;
-- native SigNoz Alertmanager notification integration;
-- distributed scheduler coordination for multiple agent replicas.
+- **multi-instance coordination.** No leader election, so two replicas
+  double-diagnose and double-spend;
+- **a continuous SLO emitter.** `audit-watch` runs continuously; `slo
+  --emit-otlp` is one-shot, so a loop is needed to keep dashboards populated and
+  SigNoz's own burn-rate alerts firing;
+- **a durable audit trail by default.** Decisions are `slog` lines unless a
+  store is configured;
+- **health and readiness endpoints on `watch`**, and timeouts on the webhook
+  listener;
+- **automatic profile-to-PromQL planning** for Track B.
 
-The current logs, traces, and metrics source is available to `audit-watch` when
-the profile references those signals. The generated OTLP metrics and SigNoz
-resources require a running collector/API endpoint and appropriate credentials.
+Two known defects, reproduced on more than one service and recorded in
+`hackathon/REBUILD-LOG.md`: a Track A traces rule that fails on a field-name
+mismatch, and a busy service auditing as `indeterminate` because filling the
+query row limit sets `Partial`.
