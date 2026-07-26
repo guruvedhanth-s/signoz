@@ -32,3 +32,12 @@ func TestMultiSinkAttemptsEverySinkAndJoinsErrors(t *testing.T) {
 		t.Fatalf("joined error does not retain sink failures: %v", err)
 	}
 }
+
+func TestWebhookSinkRejectsDirectSlackDelivery(t *testing.T) {
+	err := (WebhookSink{URL: "https://hooks.slack.com/services/T000/B000/secret"}).Notify(
+		context.Background(), Event{},
+	)
+	if err == nil {
+		t.Fatal("direct Slack delivery was accepted")
+	}
+}

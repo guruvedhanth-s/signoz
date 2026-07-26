@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +55,9 @@ func (s WebhookSink) Notify(ctx context.Context, event Event) error {
 	if s.URL == "" {
 		return nil
 	}
+	if isSlackURL(s.URL) {
+		return fmt.Errorf("direct Slack delivery is disabled; send alerts to the RCA webhook listener")
+	}
 	body, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -75,6 +80,15 @@ func (s WebhookSink) Notify(ctx context.Context, event Event) error {
 		return fmt.Errorf("alert webhook returned %s", response.Status)
 	}
 	return nil
+}
+
+func isSlackURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	return host == "slack.com" || strings.HasSuffix(host, ".slack.com")
 }
 
 type MultiSink []Sink

@@ -500,7 +500,7 @@ func runGenerate(args []string) error {
 	signozURL := fs.String("signoz-url", envOr("SIGNOZ_URL", "http://localhost:8080"), "SigNoz base URL")
 	apiKey := fs.String("api-key", os.Getenv("SIGNOZ_API_KEY"), "SigNoz service-account API key")
 	channelName := fs.String("channel", slo.DefaultChannelName, "SigNoz notification channel name")
-	webhookURL := fs.String("webhook-url", os.Getenv("ALERT_WEBHOOK_URL"), "webhook URL for generated SigNoz notification channel")
+	webhookURL := fs.String("webhook-url", envOr("SIDEKICK_WEBHOOK_URL", os.Getenv("ALERT_WEBHOOK_URL")), "RCA webhook listener URL for the generated SigNoz notification channel; Slack URLs are rejected")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
