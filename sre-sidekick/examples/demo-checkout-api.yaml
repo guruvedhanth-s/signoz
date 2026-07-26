@@ -1,0 +1,99 @@
+# Track A telemetry profile for the demo-app checkout service.
+#
+# This is the contract the api promises about its own observability, and it is
+# what the logs_missing_trace_id fault deliberately violates: the service keeps
+# serving traffic while the evidence about it degrades. That is the distinction
+# Track A exists to make - telemetry quality is not service health.
+apiVersion: reliability/v1
+kind: TelemetryProfile
+
+metadata:
+  name: demo-checkout-api
+  service: checkout-api
+  environment: local
+
+spec:
+  data_kind: backend
+  source:
+    adapter: signoz
+    endpoint: http://localhost:8080
+
+  signals:
+    logs:
+      fields:
+        - path: body
+          type: string
+          required: true
+        - path: severity_text
+          type: string
+          required: true
+        # The field the fault removes. Without it a log cannot be tied to the
+        # request that produced it, which is exactly the evidence the RCA agent
+        # needs when it goes looking for exceptions.
+        - path: trace_id
+          type: string
+          required: true
+
+    traces:
+      root_span: POST /api/checkout
+
+    metrics:
+      fields:
+        - path: checkout_orders_total
+          type: counter
+          required: true
+        - path: http.server.request.duration
+          type: histogram
+          required: true
+
+  audit_rules:
+    - id: log-body
+      type: required_field
+      signal: logs
+      field: body
+      severity: blocker
+      recommendation: Emit a non-empty log body for every request.
+
+    - id: log-severity
+      type: required_field
+      signal: logs
+      field: severity_text
+      severity: blocker
+      recommendation: Set severity_text so errors can be distinguished from noise.
+
+    - id: log-trace-correlation
+      type: required_field
+      signal: logs
+      field: trace_id
+      severity: blocker
+      recommendation: >-
+        Attach trace_id to every log record. Without it a log line cannot be
+        correlated to the request that produced it, and root-cause analysis is
+        reduced to guessing from timestamps.
+
+    - id: checkout-span-present
+      type: required_span
+      signal: traces
+      span_name: POST /api/checkout
+      severity: blocker
+      recommendation: Instrument the checkout route so its spans reach SigNoz.
+
+    - id: orders-metric-fresh
+      type: freshness
+      signal: metrics
+      field: checkout_orders_total
+      max_age: 5m
+      severity: warning
+      recommendation: >-
+        Keep the order counter flowing. A stale counter makes the availability
+        SLO indeterminate rather than healthy, which is correct but unhelpful.
+
+    - id: route-cardinality
+      type: cardinality
+      signal: metrics
+      field: http.route
+      max_distinct_values: 20
+      severity: warning
+      recommendation: >-
+        Label metrics with the low-cardinality route, never the raw path.
+        Unbounded label values are how a metrics backend gets expensive.

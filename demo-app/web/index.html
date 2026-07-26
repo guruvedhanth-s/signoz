@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Checkout - sre-sidekick demo</title>
+<style>
+  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --slow: #9a6700; --line: color-mix(in srgb, currentColor 15%, transparent); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; padding: 2rem 1.25rem; max-width: 60rem; margin-inline: auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+  p.sub { margin: 0 0 1.75rem; opacity: .7; }
+  section { border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.25rem; margin-bottom: 1.25rem; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; margin: 0 0 .9rem; }
+  button { font: inherit; padding: .5rem .9rem; border-radius: 7px; border: 1px solid var(--line); background: color-mix(in srgb, currentColor 6%, transparent); cursor: pointer; }
+  button:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+  button.primary { background: #0969da; border-color: #0969da; color: #fff; }
+  button.primary:hover { background: #0757ba; }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  .faults { display: grid; gap: .55rem; }
+  .fault { display: grid; grid-template-columns: 1fr auto auto; gap: .6rem; align-items: center; }
+  .fault code { font-size: .85rem; }
+  .fault .rate { width: 5.5rem; text-align: right; font-variant-numeric: tabular-nums; opacity: .75; font-size: .85rem; }
+  input[type=range] { width: 9rem; }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; max-height: 17rem; overflow-y: auto; border-top: 1px solid var(--line); margin-top: .9rem; padding-top: .7rem; }
+  #log div { padding: .12rem 0; white-space: nowrap; overflow-x: auto; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .slow { color: var(--slow); }
+  .hint { font-size: .82rem; opacity: .6; margin-top: .8rem; }
+</style>
+</head>
+<body>
+<h1>Checkout</h1>
+<p class="sub">A demo application observed by <strong>sre-sidekick</strong>. Every click starts a trace in the browser and continues through <code>checkout-api</code> into <code>payments</code>.</p>
+
+<section>
+  <h2>Place an order</h2>
+  <div class="row">
+    <button class="primary" id="order">Checkout once</button>
+    <button id="load">Send 20 orders</button>
+    <button id="loop" data-running="false">Start continuous traffic</button>
+  </div>
+  <div class="hint">Continuous traffic is what the SLOs need: a burn rate is meaningless without a request rate.</div>
+  <div id="log"></div>
+</section>
+
+<section>
+  <h2>Inject a fault</h2>
+  <div class="faults" id="faults"></div>
+  <div class="row" style="margin-top:1rem">
+    <button id="clear">Clear all faults</button>
+  </div>
+  <div class="hint">
+    Rates are deliberate. At 100% the good-path metric stops being emitted entirely, so the SLO
+    completeness gate cannot tell "everything failed" from "telemetry stopped" and the agent
+    correctly refuses to diagnose. Use ~80% for a diagnosable incident; use 100% to demonstrate
+    the refusal on purpose.
+  </div>
+</section>
+
+<script>
+// Minimal OTLP tracing for the browser: no SDK, no bundler, no build step.
+// Spans are posted as OTLP/HTTP JSON to the api, which relays them to the
+// collector - same-origin, so the collector needs no CORS change.
+const OTLP_PATH = "/api/traces";
+const SERVICE = "checkout-web";
+const ENVIRONMENT = "local";
+
+const hex = (bytes) => {
+  const out = new Uint8Array(bytes);
+  crypto.getRandomValues(out);
+  return [...out].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+const attr = (key, value) => ({ key, value: { stringValue: String(value) } });
+
+// One span per user action, exported when the action finishes.
+async function traced(name, run) {
+  const traceId = hex(16);
+  const spanId = hex(8);
+  // Wall-clock is fine here; sub-millisecond accuracy is irrelevant at this scale.
+  const start = Date.now() * 1e6;
+  let status = { code: 1 };       // 1 = Ok
+  let error = null;
+  try {
+    return await run({ traceparent: `00-${traceId}-${spanId}-01` });
+  } catch (e) {
+    error = e;
+    status = { code: 2, message: String(e) };   // 2 = Error
+    throw e;
+  } finally {
+    const end = Date.now() * 1e6;
+    const span = {
+      traceId, spanId, name,
+      kind: 3,                                   // CLIENT
+      startTimeUnixNano: String(start),
+      endTimeUnixNano: String(end),
+      status,
+      attributes: [
+        attr("url.full", location.href),
+        attr("user_agent.original", navigator.userAgent),
+        attr("browser.action", name),
+      ],
+    };
+    if (error) {
+      span.events = [{
+        timeUnixNano: String(end),
+        name: "exception",
+        attributes: [attr("exception.type", "FetchError"), attr("exception.message", String(error))],
+      }];
+    }
+    const payload = { resourceSpans: [{
+      resource: { attributes: [
+        attr("service.name", SERVICE),
+        attr("deployment.environment", ENVIRONMENT),
+        attr("environment", ENVIRONMENT),
+        attr("service.version", "dev"),
+      ]},
+      scopeSpans: [{ scope: { name: "browser" }, spans: [span] }],
+    }]};
+    fetch(OTLP_PATH, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => { /* telemetry must never break the app */ });
+  }
+}
+
+const logEl = document.getElementById("log");
+function log(message, kind) {
+  const line = document.createElement("div");
+  line.textContent = `${new Date().toLocaleTimeString()}  ${message}`;
+  if (kind) line.className = kind;
+  logEl.prepend(line);
+  while (logEl.childElementCount > 200) logEl.lastElementChild.remove();
+}
+
+async function checkout() {
+  const started = performance.now();
+  try {
+    const result = await traced("checkout", async ({ traceparent }) => {
+      const response = await fetch("/api/checkout", {
+        method: "POST",
+        // The header the whole demo depends on: it makes the api's span a child
+        // of this browser span, so one trace spans all three services.
+        headers: { "Content-Type": "application/json", traceparent },
+        body: JSON.stringify({ amount: 42.5 }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      return body;
+    });
+    const ms = Math.round(performance.now() - started);
+    log(`${result.order_id} confirmed in ${ms}ms`, ms > 1000 ? "slow" : "ok");
+  } catch (e) {
+    const ms = Math.round(performance.now() - started);
+    log(`checkout failed after ${ms}ms: ${e.message}`, "bad");
+  }
+}
+
+document.getElementById("order").addEventListener("click", checkout);
+document.getElementById("load").addEventListener("click", async () => {
+  for (let i = 0; i < 20; i++) { checkout(); await new Promise((r) => setTimeout(r, 120)); }
+});
+
+const loopButton = document.getElementById("loop");
+let loopTimer = null;
+loopButton.addEventListener("click", () => {
+  if (loopTimer) {
+    clearInterval(loopTimer); loopTimer = null;
+    loopButton.textContent = "Start continuous traffic";
+    log("continuous traffic stopped");
+    return;
+  }
+  loopTimer = setInterval(checkout, 700);
+  loopButton.textContent = "Stop continuous traffic";
+  log("continuous traffic started (~1.4 req/s)");
+});
+
+// Fault controls, rendered from whatever the api reports so the UI cannot drift
+// from the server's list of modes.
+const faultsEl = document.getElementById("faults");
+async function renderFaults() {
+  const response = await fetch("/api/fault");
+  const { modes, state } = await response.json();
+  faultsEl.innerHTML = "";
+  for (const mode of modes) {
+    const rate = state[mode] || 0;
+    const row = document.createElement("div");
+    row.className = "fault";
+    row.innerHTML = `
+      <code>${mode}</code>
+      <input type="range" min="0" max="100" step="5" value="${Math.round(rate * 100)}" />
+      <span class="rate">${rate > 0 ? Math.round(rate * 100) + "%" : "off"}</span>`;
+    const slider = row.querySelector("input");
+    const label = row.querySelector(".rate");
+    slider.addEventListener("input", () => {
+      label.textContent = slider.value > 0 ? `${slider.value}%` : "off";
+    });
+    slider.addEventListener("change", async () => {
+      const value = Number(slider.value) / 100;
+      await fetch("/api/fault", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, rate: value }),
+      });
+      log(`fault ${mode} -> ${value > 0 ? Math.round(value * 100) + "%" : "off"}`, value > 0 ? "bad" : "ok");
+      renderFaults();
+    });
+    faultsEl.append(row);
+  }
+}
+document.getElementById("clear").addEventListener("click", async () => {
+  await fetch("/api/fault", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clear: true }),
+  });
+  log("all faults cleared", "ok");
+  renderFaults();
+});
+renderFaults();
+</script>
+</body>
+</html>

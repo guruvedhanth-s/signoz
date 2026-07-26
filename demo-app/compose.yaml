@@ -1,0 +1,57 @@
+# The demo application, joined to the Foundry-cast SigNoz network.
+#
+# This is our own compose file for our own services. It does not touch the
+# SigNoz deployment (PRD non-goal 2) - it attaches to the network Foundry
+# already created, which is a property of our containers rather than a change to
+# theirs.
+#
+# Bring SigNoz up first (foundryctl cast -f casting.yaml), then:
+#   docker compose -f demo-app/compose.yaml up --build
+#
+# The frontend is then at http://localhost:8090
+name: demo-app
+
+services:
+  payments:
+    build:
+      context: .
+      args:
+        SERVICE: payments
+        VERSION: ${DEMO_VERSION:-dev}
+    command:
+      - --listen=0.0.0.0:8091
+      - --otlp-endpoint=http://signoz-ingester-1:4318
+      - --environment=${DEMO_ENVIRONMENT:-local}
+    ports:
+      - "8091:8091"
+    networks:
+      - signoz-network
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      args:
+        SERVICE: api
+        VERSION: ${DEMO_VERSION:-dev}
+    command:
+      - --listen=0.0.0.0:8090
+      - --payments-url=http://payments:8091
+      - --otlp-endpoint=http://signoz-ingester-1:4318
+      - --environment=${DEMO_ENVIRONMENT:-local}
+      - --web-dir=/app/web
+    ports:
+      - "8090:8090"
+    depends_on:
+      - payments
+    networks:
+      - signoz-network
+    restart: unless-stopped
+
+networks:
+  # Created by the Foundry cast, not by us. `external: true` is what keeps this
+  # file from owning - and therefore being able to recreate or remove - the
+  # SigNoz network.
+  signoz-network:
+    external: true
+    name: signoz-network
