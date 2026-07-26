@@ -308,6 +308,13 @@ evidence, produces the diagnosis, and the Slack coordinator posts the result.
 User follow-up messages are routed back through the same RCA adapter before a
 thread reply is sent. `audit-watch` does not send directly to Slack.
 
+A Slack URL passed to `--webhook-url`, or configured on a generated SigNoz
+notification channel, is rejected rather than delivered. There is deliberately
+no direct Slack sink: a raw Incoming Webhook cannot carry the Block Kit
+rendering, the incident thread, or the approval actions that the Track D adapter
+provides, so a diagnosis delivered that way would be strictly worse than one
+that went through the pipeline.
+
 ## Run an SLO evaluation
 
 ```bash
@@ -387,20 +394,22 @@ go test ./...
 go vet ./...
 ```
 
-Run the complete local workflow demo without a live SigNoz installation:
+Run the complete local workflow without a live SigNoz installation:
 
 ```bash
 make demo
 ```
 
-The demo uses an in-process SigNoz API stub and webhook receiver, but exercises
+The demo drives an in-process SigNoz API stub and webhook receiver, but exercises
 the real authenticated API, profile registration and activation, Track A audit,
-Track B SLO evaluation, completeness gate, alert debounce, webhook delivery,
-and recovery transition. A live demo still requires the prerequisites above.
+Track B SLO evaluation, the completeness gate, alert debounce, webhook delivery,
+and the recovery transition. A live run still needs the prerequisites above.
 
 Convenience targets:
 
 ```bash
+make vet
+make demo
 make run
 make run-demo-agent
 make run-demo-agent-buggy

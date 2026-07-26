@@ -113,9 +113,17 @@ func normalizeLogs(response rawLogsResponse, limit int) evidence.Snapshot {
 			}
 		}
 	}
+	// Hitting the row limit means we got a capped sample, not that the
+	// query failed to run: Partial says "there may be more than this",
+	// QueryComplete says "the query itself ran". Track A reads
+	// Snapshot.Complete() (QueryComplete && !Partial), so its behaviour is
+	// unchanged either way, but the RCA evidence gate treats
+	// QueryComplete=false as "we cannot know what evidence exists" and
+	// refuses to diagnose. Conflating the two meant a service emitting
+	// plenty of telemetry - enough to fill the limit - could never be
+	// diagnosed, while a quiet one could.
 	if limit > 0 && rowCount >= limit {
 		snapshot.Partial = true
-		snapshot.QueryComplete = false
 	}
 	for key, values := range distinct {
 		snapshot.DistinctValues[key] = len(values)
