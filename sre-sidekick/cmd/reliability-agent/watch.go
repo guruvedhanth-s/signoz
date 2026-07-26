@@ -188,6 +188,10 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		DefaultChannel: cfg.DefaultChannel,
 	}
 	actuator := &act.AdvisoryActuator{}
+	authorizer, err := sidekickslack.NewConfiguredAuthorizer(context.Background(), cfg.Authorization, api)
+	if err != nil {
+		return fmt.Errorf("build Slack authorizer: %w", err)
+	}
 
 	coordinator, err := sidekickslack.NewCoordinator(
 		slackClient, sessions, rcaAdapter,
@@ -195,6 +199,7 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
 		sidekickslack.WithCoordinatorMetrics(metrics),
 		sidekickslack.WithCoordinatorActuator(actuator),
+		sidekickslack.WithCoordinatorAuthorizer(authorizer),
 		sidekickslack.WithCoordinatorAuditor(auditor),
 	)
 	if err != nil {

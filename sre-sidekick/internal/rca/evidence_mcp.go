@@ -30,6 +30,12 @@ type EvidenceSource interface {
 	Gather(ctx context.Context, inc Incident) ([]notify.Evidence, error)
 }
 
+// DeployEventSource is deliberately separate from error evidence: deployment
+// markers must be queried explicitly, never inferred from an error log.
+type DeployEventSource interface {
+	DeployEvents(ctx context.Context, inc Incident) ([]notify.DeployEvent, bool, error)
+}
+
 // MCPEvidenceSource gathers evidence for an incident by calling SigNoz MCP
 // tools directly - error traces, the top failing trace's spans, and
 // correlated error logs, plus an optional metric snapshot - and converts
@@ -109,16 +115,84 @@ func (s *MCPEvidenceSource) Gather(ctx context.Context, inc Incident) ([]notify.
 	return out, nil
 }
 
+func (s *MCPEvidenceSource) DeployEvents(ctx context.Context, inc Incident) ([]notify.DeployEvent, bool, error) {
+	if s.Client == nil {
+		return nil, false, fmt.Errorf("rca: MCPEvidenceSource has no MCP client")
+	}
+	if _, err := slo.WindowDuration(inc.Window); err != nil {
+		return nil, false, fmt.Errorf("invalid incident window: %w", err)
+	}
+	anchor := inc.Onset
+	if anchor.IsZero() {
+		anchor = inc.Grounding.EvaluatedStart
+	}
+	if anchor.IsZero() {
+		anchor = s.now()
+	}
+	start, end := deployWindowMillis(anchor, inc.Window)
+	result, err := s.Client.CallTool(ctx, "signoz_search_traces", map[string]any{
+		"service": inc.Service, "name": "deploy", "deploy.marker": true, "start": start, "end": end, "limit": maxEvidenceItems,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	var payload spanQueryEnvelope
+	if err := result.Decode(&payload); err != nil {
+		return nil, false, err
+	}
+	var events []notify.DeployEvent
+	for _, result := range payload.Data.Data.Results {
+		for _, row := range result.Rows {
+			version := stringValue(row.Data, "deploy.version")
+			deployID := stringValue(row.Data, "deploy.id")
+			if version == "" && deployID == "" {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, row.Timestamp)
+			if err != nil {
+				continue
+			}
+			events = append(events, notify.DeployEvent{Version: version, DeployID: deployID, At: at})
+		}
+	}
+	return events, true, nil
+}
+
+func stringValue(record map[string]any, key string) string {
+	if value, ok := record[key].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	// MCP versions differ: some flatten resource attributes, others retain
+	// them under resource/resourceAttributes/attributes. Read only the exact
+	// requested key from those known containers.
+	for _, container := range []string{"resource", "resourceAttributes", "resource_attributes", "attributes"} {
+		if nested, ok := record[container].(map[string]any); ok {
+			if value, ok := nested[key].(string); ok {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
 // windowMillis converts an incident window (e.g. "1h") and an end time
 // into the [start, end] unix-millisecond bounds SigNoz MCP tools expect.
-// An unparsable window falls back to a 1-hour lookback rather than
-// failing evidence gathering outright.
+// Callers validate the window before starting a diagnosis; this defensive
+// fallback produces an empty range rather than querying an invented period.
 func windowMillis(end time.Time, window string) (startMs, endMs int64) {
 	duration, err := slo.WindowDuration(window)
 	if err != nil {
-		duration = time.Hour
+		return end.UnixMilli(), end.UnixMilli()
 	}
 	return end.Add(-duration).UnixMilli(), end.UnixMilli()
+}
+
+func deployWindowMillis(onset time.Time, window string) (startMs, endMs int64) {
+	duration, err := slo.WindowDuration(window)
+	if err != nil {
+		return onset.UnixMilli(), onset.UnixMilli()
+	}
+	return onset.Add(-2 * duration).UnixMilli(), onset.UnixMilli()
 }
 
 // spanQueryEnvelope is the response shape shared by signoz_search_traces,

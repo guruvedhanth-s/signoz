@@ -137,6 +137,29 @@ func TestMCPEvidenceSource_Gather_MapsTracesAndLogsWithRealLinks(t *testing.T) {
 	}
 }
 
+func TestMCPEvidenceSource_DeployEventsUsesIncidentOnsetAndMarkerAttributes(t *testing.T) {
+	anchor := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	fake := &fakeToolCaller{results: map[string]mcp.ToolResult{
+		"signoz_search_traces": textResult(traceRowsJSON(
+			`{"data":{"name":"deploy","deploy.version":"v2","deploy.marker":true},"timestamp":"2026-07-26T11:30:00Z"}`,
+		)),
+	}}
+	source := &MCPEvidenceSource{Client: fake, Now: func() time.Time { return anchor.Add(24 * time.Hour) }}
+	events, known, err := source.DeployEvents(context.Background(), Incident{
+		Service: "support-agent", Window: "1h", Onset: anchor,
+	})
+	if err != nil || !known || len(events) != 1 || events[0].Version != "v2" {
+		t.Fatalf("events=%+v known=%v err=%v", events, known, err)
+	}
+	args := fake.calls[0].args
+	if args["start"] != anchor.Add(-2*time.Hour).UnixMilli() || args["end"] != anchor.UnixMilli() {
+		t.Fatalf("query range=%v..%v, want onset-2h..onset", args["start"], args["end"])
+	}
+	if args["name"] != "deploy" || args["deploy.marker"] != true {
+		t.Fatalf("marker query args=%v", args)
+	}
+}
+
 func TestMCPEvidenceSource_Gather_RewritesLinksToPublicSignozURL(t *testing.T) {
 	fake := &fakeToolCaller{
 		results: map[string]mcp.ToolResult{

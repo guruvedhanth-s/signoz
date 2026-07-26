@@ -13,7 +13,10 @@
 // (M3/M4).
 package rca
 
-import "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
+import (
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
+	"time"
+)
 
 // Incident is the input to the RCA agent: which service/environment/window
 // an alert fired for, and the deterministic grounding facts computed
@@ -35,9 +38,14 @@ type Incident struct {
 	// Alert is a free-form description of which alert fired, e.g.
 	// "fast-burn" or "slow-burn".
 	Alert string
+	Onset time.Time
 	// Grounding carries the deterministic reliability facts (SLO state,
 	// burn rate, error budget, telemetry trust) this incident is based on.
 	// The RCA agent only reads and forwards these; it never sets or alters
 	// them.
 	Grounding notify.Grounding
+	// DeployEvents are explicit version/deploy markers discovered from
+	// telemetry. They are correlated deterministically before reasoning.
+	DeployEvents             []notify.DeployEvent
+	DeployCorrelationEnabled bool
 }

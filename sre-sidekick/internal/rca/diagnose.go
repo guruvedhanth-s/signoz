@@ -75,6 +75,27 @@ func (a *Agent) now() time.Time {
 //     (fetched exactly once per call, see checkGate), call the reasoner,
 //     and render the final notify.Diagnosis.
 func (a *Agent) Diagnose(ctx context.Context, inc Incident) (notify.Diagnosis, error) {
+	if inc.DeployCorrelationEnabled {
+		if source, ok := a.EvidenceSource.(DeployEventSource); ok {
+			events, known, err := source.DeployEvents(ctx, inc)
+			if err != nil {
+				inc.Grounding.RecentDeploy = &notify.DeployCorrelation{State: notify.DeployCorrelationUnknown, Reason: "deployment marker query failed"}
+			} else if known {
+				inc.DeployEvents = events
+			}
+		}
+	}
+	if inc.Grounding.RecentDeploy == nil && (inc.DeployCorrelationEnabled || len(inc.DeployEvents) > 0) {
+		onset := inc.Onset
+		if onset.IsZero() {
+			onset = inc.Grounding.EvaluatedStart
+		}
+		if onset.IsZero() {
+			onset = a.now()
+		}
+		correlation := CorrelateDeploys(inc.DeployEvents, onset, inc.Window)
+		inc.Grounding.RecentDeploy = &correlation
+	}
 	// PRD 13.4 rule 1 / notify.Grounding.TelemetryTrusted's own contract:
 	// "when false, diagnosis must be StatusIndeterminate". This is checked
 	// before the (separate) RCA evidence gate and before the reasoner is

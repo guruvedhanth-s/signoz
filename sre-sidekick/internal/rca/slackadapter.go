@@ -56,15 +56,24 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 	if window == "" {
 		window = a.window()
 	}
+	onset := req.FiringAt
+	if onset.IsZero() {
+		onset = grounding.EvaluatedStart
+	}
+	if onset.IsZero() {
+		onset = a.now()
+	}
 
 	incident := Incident{
-		CorrelationID: fmt.Sprintf("slack-%s-%s-%d", req.Service, req.Environment, a.now().UnixNano()),
-		Service:       req.Service,
-		Environment:   req.Environment,
-		Window:        window,
-		SLO:           sloName,
-		Alert:         req.Alert,
-		Grounding:     grounding,
+		CorrelationID:            fmt.Sprintf("slack-%s-%s-%d", req.Service, req.Environment, a.now().UnixNano()),
+		Service:                  req.Service,
+		Environment:              req.Environment,
+		Window:                   window,
+		SLO:                      sloName,
+		Alert:                    req.Alert,
+		Onset:                    onset,
+		Grounding:                grounding,
+		DeployCorrelationEnabled: true,
 	}
 	return a.Agent.Diagnose(ctx, incident)
 }
@@ -75,6 +84,12 @@ func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) 
 // fabricating one when the reasoner is not the real thing.
 func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupRequest) (string, error) {
 	ctx = limits.WithIdentity(ctx, req.AskedBy, req.ChannelID)
+	if ResolveIntent(req.Question) == IntentWhatChanged {
+		if summary := req.Diagnosis.Grounding.RecentDeploy.Summary(); summary != "" {
+			return summary, nil
+		}
+		return "No deploy correlation is available for this incident.", nil
+	}
 	reasoner, ok := a.Agent.Reasoner.(*LLMReasoner)
 	if !ok {
 		return "", fmt.Errorf("rca: follow-up questions require the live LLM reasoner")

@@ -146,9 +146,24 @@ type SlackConfig struct {
 	// MaxConcurrentRCA caps how many diagnose runs may be in flight at once so
 	// an alert storm cannot launch unbounded paid LLM/MCP work (session design
 	// edge case E8).
-	MaxConcurrentRCA int    `yaml:"max_concurrent_rca" json:"max_concurrent_rca"`
-	SessionStorePath string `yaml:"session_store_path" json:"session_store_path"`
-	AuditLogPath     string `yaml:"audit_log_path" json:"audit_log_path"`
+	MaxConcurrentRCA int                 `yaml:"max_concurrent_rca" json:"max_concurrent_rca"`
+	SessionStorePath string              `yaml:"session_store_path" json:"session_store_path"`
+	AuditLogPath     string              `yaml:"audit_log_path" json:"audit_log_path"`
+	Authorization    AuthorizationConfig `yaml:"authorization" json:"authorization"`
+}
+
+// AuthorizationConfig defines the Slack users and user groups allowed to
+// make incident decisions. Empty rosters preserve the advisory MVP's
+// permissive behavior; once either roster is configured, users must match a
+// role to decide.
+type AuthorizationConfig struct {
+	Approvers AuthorizationRoleConfig `yaml:"approvers" json:"approvers"`
+	Operators AuthorizationRoleConfig `yaml:"operators" json:"operators"`
+}
+
+type AuthorizationRoleConfig struct {
+	Users  []string `yaml:"users" json:"users"`
+	Groups []string `yaml:"groups" json:"groups"`
 }
 
 // Load reads, parses, defaults, and fully validates the config file at
@@ -309,11 +324,53 @@ func (s SlackConfig) Validate() error {
 	if s.MaxConcurrentRCA < 1 {
 		return fmt.Errorf("max_concurrent_rca must be >= 1, got %d", s.MaxConcurrentRCA)
 	}
+	if err := validateAuthorization(s.Authorization); err != nil {
+		return err
+	}
 	if _, err := s.BotToken(); err != nil {
 		return err
 	}
 	if _, err := s.AppToken(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateAuthorization(a AuthorizationConfig) error {
+	seen := make(map[string]struct{})
+	for _, entry := range []struct {
+		role   string
+		roster AuthorizationRoleConfig
+	}{
+		{role: "approvers", roster: a.Approvers},
+		{role: "operators", roster: a.Operators},
+	} {
+		role, roster := entry.role, entry.roster
+		for _, user := range roster.Users {
+			user = strings.TrimSpace(user)
+			if user == "" {
+				return fmt.Errorf("authorization.%s.users must not contain empty values", role)
+			}
+			if strings.HasPrefix(user, "@") {
+				return fmt.Errorf("authorization.%s.users must contain Slack user IDs, not handles", role)
+			}
+			key := role + ":user:" + user
+			if _, ok := seen[key]; ok {
+				return fmt.Errorf("authorization.%s.users contains duplicate user %q", role, user)
+			}
+			seen[key] = struct{}{}
+		}
+		for _, group := range roster.Groups {
+			group = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(group, "@")))
+			if group == "" {
+				return fmt.Errorf("authorization.%s.groups must not contain empty values", role)
+			}
+			key := role + ":group:" + group
+			if _, ok := seen[key]; ok {
+				return fmt.Errorf("authorization.%s.groups contains duplicate group %q", role, group)
+			}
+			seen[key] = struct{}{}
+		}
 	}
 	return nil
 }

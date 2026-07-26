@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,13 +29,14 @@ import (
 //   - It does not act. An approval is recorded with who approved it and when,
 //     and the human performs the fix by hand (PRD sections 5.6, 15).
 type Coordinator struct {
-	client   *Client
-	sessions *session.Manager
-	rca      RCA
-	actuator Actuator
-	auditor  session.Auditor
-	logger   *slog.Logger
-	metrics  *Metrics
+	client     *Client
+	sessions   *session.Manager
+	rca        RCA
+	actuator   Actuator
+	authorizer Authorizer
+	auditor    session.Auditor
+	logger     *slog.Logger
+	metrics    *Metrics
 
 	defaultEnvironment string
 
@@ -75,6 +77,15 @@ func WithCoordinatorActuator(actuator Actuator) CoordinatorOption {
 	return func(c *Coordinator) {
 		if actuator != nil {
 			c.actuator = actuator
+		}
+	}
+}
+
+// WithCoordinatorAuthorizer attaches the click-time authorization policy.
+func WithCoordinatorAuthorizer(authorizer Authorizer) CoordinatorOption {
+	return func(c *Coordinator) {
+		if authorizer != nil {
+			c.authorizer = authorizer
 		}
 	}
 }
@@ -127,6 +138,7 @@ func NewCoordinator(
 		sessions:           sessions,
 		rca:                rca,
 		actuator:           NoopActuator{},
+		authorizer:         PermissiveAuthorizer{},
 		logger:             slog.Default(),
 		defaultEnvironment: "prod",
 		analysis:           make(chan struct{}, 5),
@@ -205,7 +217,9 @@ func (c *Coordinator) OnInteraction(ctx context.Context, in Interaction) {
 	case ActionDecline:
 		c.decide(ctx, found, in, session.DecisionDeclined)
 	case ActionClose:
-		c.closeSession(ctx, found, in)
+		if _, ok := c.authorize(ctx, found, in, RoleApprover); ok {
+			c.closeSession(ctx, found, in)
+		}
 	case ActionVerify:
 		c.verify(ctx, found, in)
 	default:
@@ -216,9 +230,15 @@ func (c *Coordinator) OnInteraction(ctx context.Context, in Interaction) {
 func (c *Coordinator) decide(
 	ctx context.Context, s *session.Session, in Interaction, kind session.DecisionKind,
 ) {
+	authorization, ok := c.authorize(ctx, s, in, RoleApprover)
+	if !ok {
+		return
+	}
 	accepted, existing, err := c.sessions.Decide(s, session.Decision{
-		Kind:   kind,
-		UserID: in.UserID,
+		Kind:              kind,
+		UserID:            in.UserID,
+		Authorization:     authorization.Mode,
+		AuthorizationRole: string(authorization.Role),
 	})
 	if err != nil {
 		c.postReply(ctx, in.ChannelID, in.ThreadTS,
@@ -234,7 +254,8 @@ func (c *Coordinator) decide(
 		))
 		return
 	}
-	c.audit(session.AuditEvent{Type: "decision_recorded", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID, Payload: fmt.Sprintf(`{"decision":%q}`, kind)})
+	payload, _ := json.Marshal(map[string]any{"decision": kind, "authorization_mode": authorization.Mode, "authorization_role": authorization.Role})
+	c.audit(session.AuditEvent{Type: "decision_recorded", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID, Payload: string(payload)})
 
 	verb := "approved"
 	detail := "Recorded as approved. Nothing was executed: apply the fix by hand, then verify."
@@ -296,6 +317,9 @@ func (c *Coordinator) act(ctx context.Context, s *session.Session) {
 // unlike Approve/Decline, it can be clicked repeatedly while a human waits
 // for a fix to take effect.
 func (c *Coordinator) verify(ctx context.Context, s *session.Session, in Interaction) {
+	if _, ok := c.authorize(ctx, s, in, RoleApprover); !ok {
+		return
+	}
 	d := s.Diagnosis()
 	if strings.TrimSpace(d.Grounding.SLO) == "" {
 		c.postReply(ctx, in.ChannelID, in.ThreadTS, "This incident has no SLO to re-check.")
@@ -330,6 +354,37 @@ func (c *Coordinator) verify(ctx context.Context, s *session.Session, in Interac
 	)
 
 	c.postReply(ctx, in.ChannelID, in.ThreadTS, verifyMessage(result))
+}
+
+// authorize is the security boundary for state-changing and decision-sensitive
+// interactive actions. Read-only diagnosis and follow-up questions remain
+// available without an approver role. The attempt is audited for both outcomes.
+func (c *Coordinator) authorize(ctx context.Context, s *session.Session, in Interaction, required Role) (AuthorizationResult, bool) {
+	result := c.authorizer.Authorize(ctx, AuthorizationRequest{
+		UserID: in.UserID, ChannelID: in.ChannelID, ThreadTS: in.ThreadTS,
+		ActionID: in.ActionID, Required: required,
+	})
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"action": in.ActionID, "required_role": required, "allowed": result.Allowed,
+		"matched_role": result.Role, "mode": result.Mode, "source": result.Source, "reason": result.Reason,
+	})
+	c.audit(session.AuditEvent{
+		Type: "authorization_attempt", CorrelationID: s.CorrelationID,
+		Service: s.Service, Environment: s.Environment, Actor: in.UserID, Payload: string(payloadBytes),
+	})
+	c.logger.Info("slack authorization attempt", "correlation_id", s.CorrelationID,
+		"action", in.ActionID, "user", in.UserID, "required_role", required,
+		"allowed", result.Allowed, "matched_role", result.Role, "reason", result.Reason)
+	if result.Allowed {
+		return result, true
+	}
+	reason := result.Reason
+	if reason == "" {
+		reason = "the required role is not assigned to your Slack user"
+	}
+	c.logger.Warn("slack interaction denied", "correlation_id", s.CorrelationID, "action", in.ActionID, "user", in.UserID, "reason", reason)
+	c.postReply(ctx, in.ChannelID, in.ThreadTS, fmt.Sprintf("You are not authorized to perform this action: %s. Ask an authorized approver or operator.", reason))
+	return result, false
 }
 
 // verifyMessage renders a VerifyResult as plain text: the deterministic

@@ -1,6 +1,8 @@
 package slack
 
-import "context"
+import (
+	"context"
+)
 
 // Actuator executes (or, in the advisory MVP, records) an approved
 // remediation proposal (PRD sections 15, 18). Declared here, consumer

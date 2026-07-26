@@ -32,6 +32,8 @@ func GroundingFromReport(environment string, report slo.Report) notify.Grounding
 		BurnRate:             report.BurnRate,
 		ErrorBudgetRemaining: report.ErrorBudgetRemaining,
 		TelemetryTrusted:     report.Gate.Trusted,
+		EvaluatedStart:       report.EvaluatedStart,
+		EvaluatedEnd:         report.EvaluatedEnd,
 	}
 }
 

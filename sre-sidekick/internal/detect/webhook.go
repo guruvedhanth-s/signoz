@@ -103,8 +103,9 @@ func NewHandler(secret string, diagnoser Diagnoser, announcer Announcer, opts ..
 type alertmanagerWebhook struct {
 	Status string `json:"status"` // "firing" or "resolved", the group-level default
 	Alerts []struct {
-		Status string            `json:"status"`
-		Labels map[string]string `json:"labels"`
+		Status   string            `json:"status"`
+		Labels   map[string]string `json:"labels"`
+		StartsAt string            `json:"startsAt"`
 	} `json:"alerts"`
 }
 
@@ -127,7 +128,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == "" {
 			status = payload.Status
 		}
-		h.handleAlert(ctx, alert.Labels, status)
+		var firingAt time.Time
+		if alert.StartsAt != "" {
+			firingAt, _ = time.Parse(time.RFC3339Nano, alert.StartsAt)
+		}
+		h.handleAlert(ctx, alert.Labels, status, firingAt)
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -144,7 +149,7 @@ func (h *Handler) authorized(r *http.Request) bool {
 // Only resolves service/environment/window/alert from labels - a
 // deliberately dumb, deterministic mapping with no reasoning involved
 // (PRD section 12).
-func (h *Handler) handleAlert(ctx context.Context, labels map[string]string, status string) {
+func (h *Handler) handleAlert(ctx context.Context, labels map[string]string, status string, firingAt time.Time) {
 	service := labels["service"]
 	environment := labels["environment"]
 	if service == "" || environment == "" {
@@ -167,6 +172,7 @@ func (h *Handler) handleAlert(ctx context.Context, labels map[string]string, sta
 		Environment: environment,
 		Window:      window,
 		Alert:       alertName,
+		FiringAt:    firingAt,
 	})
 	if err != nil {
 		slog.Error("detect: diagnose failed for an alert-driven incident",

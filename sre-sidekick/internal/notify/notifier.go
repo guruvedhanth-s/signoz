@@ -13,6 +13,8 @@ package notify
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -51,7 +53,86 @@ type Grounding struct {
 	// TelemetryTrusted reports whether the completeness gate trusted the
 	// telemetry for this window. When false, diagnosis must be
 	// StatusIndeterminate.
-	TelemetryTrusted bool `json:"telemetryTrusted"`
+	TelemetryTrusted bool               `json:"telemetryTrusted"`
+	EvaluatedStart   time.Time          `json:"evaluatedStart,omitempty"`
+	EvaluatedEnd     time.Time          `json:"evaluatedEnd,omitempty"`
+	RecentDeploy     *DeployCorrelation `json:"recentDeploy,omitempty"`
+}
+
+type DeployCorrelationState string
+
+const (
+	DeployCorrelationFound   DeployCorrelationState = "found"
+	DeployCorrelationNone    DeployCorrelationState = "none"
+	DeployCorrelationUnknown DeployCorrelationState = "unknown"
+)
+
+type DeployCorrelation struct {
+	Candidates   []DeployCandidate      `json:"candidates,omitempty"`
+	ExplicitNone bool                   `json:"explicitNone,omitempty"`
+	State        DeployCorrelationState `json:"state"`
+	Reason       string                 `json:"reason,omitempty"`
+}
+
+type DeployCandidate struct {
+	Version  string        `json:"version,omitempty"`
+	DeployID string        `json:"deployId,omitempty"`
+	At       time.Time     `json:"at"`
+	Gap      time.Duration `json:"gap"`
+}
+
+type DeployEvent struct {
+	Version  string    `json:"version,omitempty"`
+	DeployID string    `json:"deployId,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+func (d *DeployCorrelation) Summary() string {
+	if d == nil {
+		return ""
+	}
+	if len(d.Candidates) == 0 {
+		if d.ExplicitNone || d.State == DeployCorrelationNone {
+			return "No recent deploy in the incident window."
+		}
+		if d.State == DeployCorrelationUnknown {
+			return "Deploy correlation is unavailable: " + d.Reason + "."
+		}
+		return ""
+	}
+	parts := make([]string, 0, len(d.Candidates))
+	for _, candidate := range d.Candidates {
+		label := candidate.Version
+		if label == "" {
+			label = candidate.DeployID
+		}
+		if label == "" {
+			label = "unidentified version"
+		}
+		parts = append(parts, fmt.Sprintf("%s, %s before onset", label, formatDuration(candidate.Gap)))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	if d < time.Hour {
+		return d.Round(time.Minute).String()
+	}
+	if d < 24*time.Hour {
+		hours := int(d / time.Hour)
+		minutes := int((d - time.Duration(hours)*time.Hour) / time.Minute)
+		if minutes == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	return d.Round(time.Hour).String()
 }
 
 // EvidenceKind identifies the signal type behind an Evidence entry.
@@ -71,10 +152,13 @@ type Evidence struct {
 	// RootCause and each Candidate cite evidence by ID (EvidenceIDs); a
 	// cited id must resolve to an entry here (PRD section 13.4: the agent
 	// must cite the evidence it used).
-	ID         string       `json:"id"`
-	Kind       EvidenceKind `json:"kind"`
-	SignozLink string       `json:"signozLink"`
-	Note       string       `json:"note"`
+	ID            string       `json:"id"`
+	Kind          EvidenceKind `json:"kind"`
+	SignozLink    string       `json:"signozLink"`
+	Note          string       `json:"note"`
+	Timestamp     time.Time    `json:"timestamp,omitempty"`
+	DeployVersion string       `json:"deployVersion,omitempty"`
+	DeployID      string       `json:"deployId,omitempty"`
 }
 
 // Candidate is one ranked hypothesis for the root cause. Used instead of
