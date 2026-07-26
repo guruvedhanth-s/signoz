@@ -18,16 +18,79 @@ MCP evidence gathering, the LLM call, Block Kit rendering, session creation - is
 the same code the real alert drives.
 It just means a take starts when you say so.
 
+## Two setup rules the first rehearsal established
+
+Both of these were found the hard way, and either one silently ruins a take.
+
+### Run the buggy agent at 80% failure, never 100%
+
+```sh
+go run ./cmd/demo-agent --buggy --error-rate 0.8
+```
+
+`--buggy` alone means a 100% error rate, and in that mode
+`agent_grounded_answers_total` never increments at all (see the comment in
+`cmd/demo-agent/main.go`).
+Once the 5m SLO window contains nothing but failing traffic, the good-path
+metric has zero samples, the completeness gate cannot tell "everything failed"
+apart from "telemetry stopped", and it refuses to diagnose.
+
+Observed live: the gate reported `1 of 2 dependencies have data` and the alert
+came back `indeterminate`, telemetry trusted `no`.
+That is the product upholding its own invariant, not a bug - but it gave the
+demo a hidden expiry, where firing 1-4 minutes after the bad deploy produced a
+diagnosis and firing at 5+ minutes produced nothing.
+
+At 80% the good counter keeps incrementing, the gate stays trusted
+indefinitely, and there is no timing cliff at all.
+The numbers are also more dramatic: 18.7x burn versus 4.0x.
+
+### One incident per service is one thread
+
+Re-firing the same service does not produce a second message.
+It deduplicates into the existing session and posts a `thread_reply` into that
+thread instead, which is correct behaviour and exactly what you do not want
+between takes.
+Changing `alertname` does **not** help; the fingerprint is service-based.
+
+To get a fresh top-level diagnosis, either click **Close session** on the old
+message in Slack, or restart `watch` (sessions are in memory, so a restart
+clears them).
+
+Restarting `watch` also kills the buttons on any message already in the
+channel: clicking them replies "this session was lost". Always click on the
+newest message.
+
 ## Measured timings
 
 | Step | Wait | What is happening |
 |---|---|---|
+| Bad deploy to grounded-answers unhealthy | ~1 min | measured at 55 sec, not the 3 min first assumed |
 | Bad deploy to latency SLO unhealthy | ~2 min | the 5m window fills with failing spans |
-| Bad deploy to grounded-answers unhealthy | ~3 min | slower: the ratio metric needs more failing samples |
 | Webhook fired to Slack message posted | ~7 sec | RCA, MCP evidence, DeepSeek, render |
 | Fix applied to SLOs healthy again | ~10 min | the failing period ages out of the 5m window |
 
 The last row is the only one that needs a cut in the edit.
+
+Burn rate varies with how long the failure has been running - 4.0x, 8.6x, and
+18.7x across three rehearsal takes.
+Fire at a consistent interval after the bad deploy if a specific number matters
+on screen.
+
+## Reading the buttons correctly
+
+"Not recovered" and "not connected" look similar at a glance and mean opposite
+things.
+
+- **"not recovered"** is success: the deterministic check ran and honestly
+  reported that the service is still broken.
+- **"The verify engine is not connected yet"** is failure: the check could not
+  run at all. Do not record with this showing.
+
+Server-side proof, which Slack cannot fake: `advisory action recorded` in the
+`watch` log for an approval, and `verify checked` for a verify.
+If a click produces no log line at all, the event never left Slack - Interactivity
+is disabled in the app settings.
 
 Use `examples/support-agent-slo-demo.yaml` (5m window), not
 `examples/support-agent-slo.yaml` (1h).
