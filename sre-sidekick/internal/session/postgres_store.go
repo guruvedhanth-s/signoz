@@ -49,6 +49,11 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		environment TEXT, actor TEXT, occurred_at TIMESTAMPTZ NOT NULL, payload JSONB)`); err != nil {
 		return fmt.Errorf("session: create audit schema: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS sidekick_sessions_open_fingerprint_idx
+		ON sidekick_sessions ((snapshot->>'fingerprint'))
+		WHERE snapshot->>'status'='open'`); err != nil {
+		return fmt.Errorf("session: create fingerprint index: %w", err)
+	}
 	return nil
 }
 

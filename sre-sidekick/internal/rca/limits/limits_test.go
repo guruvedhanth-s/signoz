@@ -51,3 +51,13 @@ func TestManagerReconcilesProviderUsage(t *testing.T) {
 		t.Fatalf("hour tokens = %d, want 7", hourTokens)
 	}
 }
+
+func TestManagerDefaultRequestCeilingAllowsEvidenceHeavyPrompt(t *testing.T) {
+	m := New(Config{})
+	if err := m.Allow(context.Background(), Request{EstimatedTokens: 12000}); err != nil {
+		t.Fatalf("default ceiling rejected evidence-heavy request: %v", err)
+	}
+	if !errors.Is(m.Allow(context.Background(), Request{EstimatedTokens: 12001}), ErrBudgetExhausted) {
+		t.Fatal("expected request above the default ceiling to be rejected")
+	}
+}

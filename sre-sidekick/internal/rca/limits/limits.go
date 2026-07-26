@@ -28,7 +28,10 @@ type Config struct {
 
 func (c Config) WithDefaults() Config {
 	if c.MaxTokensPerRequest <= 0 {
-		c.MaxTokensPerRequest = 4000
+		// The reservation includes the estimated prompt plus the configured
+		// completion allowance.  Leave room for evidence-heavy RCA prompts
+		// instead of rejecting them before the provider can degrade naturally.
+		c.MaxTokensPerRequest = 12000
 	}
 	if c.HourlyRequests <= 0 {
 		c.HourlyRequests = 100
@@ -143,14 +146,6 @@ func (m *Manager) Allow(ctx context.Context, req Request) error {
 	m.hourTokens += req.EstimatedTokens
 	m.dayTokens += req.EstimatedTokens
 	return nil
-}
-
-func (m *Manager) allowKey(values map[string][]time.Time, key string, now time.Time, max int) bool {
-	if !m.canAllow(values, key, now, max) {
-		return false
-	}
-	m.recordKey(values, key, now)
-	return true
 }
 
 func (m *Manager) canAllow(values map[string][]time.Time, key string, now time.Time, max int) bool {

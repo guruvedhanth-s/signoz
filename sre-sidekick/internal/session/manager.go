@@ -196,6 +196,10 @@ func (m *Manager) Open(req OpenRequest) (*Session, bool, error) {
 	m.byFingerprint[fingerprint] = created
 	snapshot := created.viewLocked()
 	m.mu.Unlock()
+	// Persistence intentionally happens outside the manager lock so a slow or
+	// unavailable store cannot block routing. During this small window a
+	// concurrent lookup may observe the in-memory session; on persistence
+	// failure the indexes are rolled back and the caller receives the error.
 	if err := m.persistView(snapshot); err != nil {
 		m.mu.Lock()
 		delete(m.byThread, threadKey(channel, thread))

@@ -52,7 +52,10 @@ llm:
   api_key_env: OPENROUTER_API_KEY
   # Shared diagnosis and follow-up protection. Zero values use safe defaults.
   limits:
-    max_tokens_per_request: 4000
+    # Includes estimated prompt tokens and the completion allowance.  RCA
+    # prompts can contain several evidence records, so this must exceed the
+    # 4k completion cap used by the reasoner.
+    max_tokens_per_request: 12000
     hourly_requests: 100
     hourly_tokens: 100000
     daily_requests: 1000
