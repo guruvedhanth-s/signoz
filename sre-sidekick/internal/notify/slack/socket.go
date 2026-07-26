@@ -42,6 +42,10 @@ type Handler interface {
 	// OnMessage handles a human message. Messages posted by bots are filtered
 	// out before this is called.
 	OnMessage(ctx context.Context, msg Message)
+	// OnMention handles a direct address to the sidekick: an @mention in a
+	// channel or thread, or a direct message. Bot-authored mentions are
+	// filtered out before this is called.
+	OnMention(ctx context.Context, mention Mention)
 	// OnInteraction handles a Block Kit button click: approve, decline or
 	// close.
 	OnInteraction(ctx context.Context, interaction Interaction)
@@ -218,6 +222,7 @@ type job struct {
 	kind        string
 	id          string
 	message     *Message
+	mention     *Mention
 	interaction *Interaction
 	command     *Command
 }
@@ -300,6 +305,13 @@ func (r *Receiver) decode(event socketmode.Event) (job, bool) {
 		if !ok {
 			return job{}, false
 		}
+		if mention, ok := mentionFrom(apiEvent, eventID(apiEvent, event.Request)); ok {
+			if mention.FromBot || mention.UserID == "" || mention.Text == "" {
+				return job{}, false
+			}
+			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
+		}
+
 		msg, ok := messageFrom(apiEvent, eventID(apiEvent, event.Request))
 		if !ok {
 			return job{}, false
@@ -312,7 +324,28 @@ func (r *Receiver) decode(event socketmode.Event) (job, bool) {
 		if msg.UserID == "" || msg.Text == "" {
 			return job{}, false
 		}
-		return job{kind: "message", id: msg.EventID, message: &msg}, true
+		if mention, ok := directMessageFrom(msg, msg.ChannelType); ok {
+			// A DM is addressed to the sidekick by definition; there is no
+			// handle to look for and no unrelated conversation to barge into.
+			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
+		}
+		if stripped := stripHandle(msg.Text); stripped != msg.Text {
+			// Slack may deliver the same human turn as both app_mention and
+			// message. Turn-keying only the addressed message path keeps that
+			// one question to one answer without collapsing ordinary messages
+			// that happen to share a timestamp in tests or replays.
+			mention := Mention{
+				TurnID:    turnID(msg.ChannelID, msg.MessageTS, msg.UserID),
+				ChannelID: msg.ChannelID,
+				ThreadTS:  msg.ThreadTS,
+				MessageTS: msg.MessageTS,
+				UserID:    msg.UserID,
+				Text:      stripped,
+				TeamID:    msg.TeamID,
+			}
+			return job{kind: "mention", id: mention.TurnID, mention: &mention}, true
+		}
+		return job{kind: "message", id: eventID(apiEvent, event.Request), message: &msg}, true
 
 	case socketmode.EventTypeInteractive:
 		callback, ok := event.Data.(slack.InteractionCallback)
@@ -365,6 +398,8 @@ func (r *Receiver) run(base context.Context, next job) {
 	switch {
 	case next.message != nil:
 		r.handler.OnMessage(ctx, *next.message)
+	case next.mention != nil:
+		r.handler.OnMention(ctx, *next.mention)
 	case next.interaction != nil:
 		r.handler.OnInteraction(ctx, *next.interaction)
 	case next.command != nil:

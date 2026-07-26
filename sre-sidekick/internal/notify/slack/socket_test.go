@@ -60,6 +60,7 @@ func (a *recordingAcker) count() int {
 type recordingHandler struct {
 	mu           sync.Mutex
 	messages     []Message
+	mentions     []Mention
 	interactions []Interaction
 	commands     []Command
 
@@ -89,6 +90,13 @@ func (h *recordingHandler) OnMessage(_ context.Context, msg Message) {
 	}
 	h.mu.Lock()
 	h.messages = append(h.messages, msg)
+	h.mu.Unlock()
+	h.done <- struct{}{}
+}
+
+func (h *recordingHandler) OnMention(_ context.Context, mention Mention) {
+	h.mu.Lock()
+	h.mentions = append(h.mentions, mention)
 	h.mu.Unlock()
 	h.done <- struct{}{}
 }
@@ -418,6 +426,7 @@ func (h *contextProbeHandler) OnMessage(ctx context.Context, _ Message) {
 	}
 	h.deadlines <- deadline
 }
+func (h *contextProbeHandler) OnMention(context.Context, Mention)         {}
 func (h *contextProbeHandler) OnInteraction(context.Context, Interaction) {}
 func (h *contextProbeHandler) OnCommand(context.Context, Command)         {}
 
@@ -460,6 +469,7 @@ func (h *countingHandler) OnMessage(context.Context, Message) {
 	h.inFlight.Add(-1)
 	h.done <- struct{}{}
 }
+func (h *countingHandler) OnMention(context.Context, Mention)         {}
 func (h *countingHandler) OnInteraction(context.Context, Interaction) {}
 func (h *countingHandler) OnCommand(context.Context, Command)         {}
 
