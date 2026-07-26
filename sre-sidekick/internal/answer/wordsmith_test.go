@@ -2,6 +2,7 @@ package answer
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 )
 
 // llmServer stands in for OpenRouter, replying with whatever wording the
@@ -17,7 +19,13 @@ func llmServer(t *testing.T, reply string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"` + reply + `"}}]}`))
+		body, err := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -98,7 +106,7 @@ func TestLLMWordsmithTimeoutDegrades(t *testing.T) {
 
 func TestNewWordsmithFromEnvWithoutKey(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
-	wordsmith, err := NewWordsmithFromEnv()
+	wordsmith, err := NewWordsmithFromEnv(nil)
 	if err == nil {
 		t.Fatal("expected an error explaining that templates will be used")
 	}
@@ -115,7 +123,8 @@ func TestNewWordsmithFromEnvWithoutKey(t *testing.T) {
 func TestNewWordsmithFromEnvUsesSharedConfig(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "test-key")
 	t.Setenv("RCA_MODEL", "deepseek/deepseek-chat")
-	wordsmith, err := NewWordsmithFromEnv()
+	manager := limits.New(limits.Config{})
+	wordsmith, err := NewWordsmithFromEnv(manager)
 	if err != nil {
 		t.Fatalf("NewWordsmithFromEnv: %v", err)
 	}
@@ -125,5 +134,8 @@ func TestNewWordsmithFromEnvUsesSharedConfig(t *testing.T) {
 	}
 	if llm.Reasoner.Model != "deepseek/deepseek-chat" {
 		t.Errorf("model = %q; the composer must share the reasoner's configuration", llm.Reasoner.Model)
+	}
+	if llm.Reasoner.Limits != manager {
+		t.Error("wordsmith reasoner did not receive shared limits manager")
 	}
 }

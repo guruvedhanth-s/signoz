@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 )
 
 // defaultWordsmithTimeout bounds one wording call. It is much shorter than
@@ -48,23 +49,21 @@ func (w LLMWordsmith) Phrase(ctx context.Context, prompt Prompt) (string, error)
 	return w.Reasoner.CompleteText(ctx, prompt.System, prompt.User)
 }
 
+// NewWordsmithFromReasoner adapts the already-built RCA reasoner for answer
+// wording. Production callers should prefer this path so budget, rate
+// limits and circuit breakers remain shared across every OpenRouter call.
+func NewWordsmithFromReasoner(reasoner *rca.LLMReasoner) Wordsmith {
+	if reasoner == nil {
+		return nil
+	}
+	return LLMWordsmith{Reasoner: reasoner}
+}
+
 // NewWordsmithFromEnv builds the LLM wording layer from the same
-// environment the RCA reasoner uses: OPENROUTER_API_KEY, RCA_MODEL,
-// OPENROUTER_BASE_URL. One model configuration for the whole agent means
-// an operator cannot end up with a reasoner and a composer pointing at
-// different providers.
-//
-// A missing key returns (nil, error) rather than a stub. That is the whole
-// contract: the caller passes the nil Wordsmith straight into a Composer,
-// which is a supported, fully functional template-only mode - not a
-// degraded one, and not an error worth aborting startup over.
-//
-//	wordsmith, err := answer.NewWordsmithFromEnv()
-//	if err != nil {
-//	    slog.Info("answer: composing without an LLM", "reason", err)
-//	}
-//	composer := answer.Composer{Wordsmith: wordsmith}
-func NewWordsmithFromEnv() (Wordsmith, error) {
+// environment the RCA reasoner uses, and attaches the supplied limits
+// manager. A missing key returns (nil, error); callers can pass nil into
+// Composer for template-only mode.
+func NewWordsmithFromEnv(manager *limits.Manager) (Wordsmith, error) {
 	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 	if apiKey == "" {
 		return nil, fmt.Errorf("answer: OPENROUTER_API_KEY is not set; answers will use deterministic templates")
@@ -73,5 +72,6 @@ func NewWordsmithFromEnv() (Wordsmith, error) {
 	if err != nil {
 		return nil, err
 	}
+	reasoner.Limits = manager
 	return LLMWordsmith{Reasoner: reasoner}, nil
 }

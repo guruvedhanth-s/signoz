@@ -101,13 +101,13 @@ func (c Composer) ComposeAny(ctx context.Context, result any) (Answer, error) {
 func (c Composer) ComposeFacts(ctx context.Context, facts Facts) Answer {
 	template := RenderTemplate(facts)
 	answer := Answer{Text: template, Source: SourceTemplate, Facts: facts}
-	if c.Wordsmith == nil {
+	if c.Wordsmith == nil || facts.Indeterminate {
 		return answer
 	}
 
 	phrased, err := c.Wordsmith.Phrase(ctx, BuildPrompt(facts))
 	if err != nil {
-		answer.FallbackReason = "wording unavailable: " + err.Error()
+		answer.FallbackReason = "wording unavailable: " + truncateFallbackReason(err.Error())
 		return answer
 	}
 	phrased = strings.TrimSpace(phrased)
@@ -119,13 +119,21 @@ func (c Composer) ComposeFacts(ctx context.Context, facts Facts) Answer {
 		// The model stated a figure nobody computed. This is the failure
 		// the whole product exists to prevent, so the wording is discarded
 		// outright - not repaired, not retried into acceptance.
-		answer.FallbackReason = "rejected model wording: " + err.Error()
+		answer.FallbackReason = "rejected model wording: " + truncateFallbackReason(err.Error())
 		return answer
 	}
 
 	answer.Text = phrased
 	answer.Source = SourceLLM
 	return answer
+}
+
+func truncateFallbackReason(reason string) string {
+	const max = 512
+	if len(reason) <= max {
+		return reason
+	}
+	return reason[:max] + "..."
 }
 
 // composerSystemPrompt is intentionally small and boring. The model's only

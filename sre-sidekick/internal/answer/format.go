@@ -24,8 +24,8 @@ type Fact struct {
 
 // Facts is the complete composer input for one answer: pre-formatted
 // values, the provenance that must always be stated, and a verdict the
-// rules decided. There is no float anywhere in this struct, and no field
-// carrying text authored outside our own code or config (see Caveat).
+// rules decided. There is no float anywhere in this struct, and free-form
+// text is either our own wording or bounded identifiers/provenance.
 type Facts struct {
 	Intent      string `json:"intent"`
 	Service     string `json:"service,omitempty"`
@@ -346,9 +346,11 @@ func recentIncidentsFacts(facts *Facts, data RecentIncidents) {
 		facts.Headline = "recent incidents"
 	}
 	for _, incident := range data.Incidents {
+		// RootCause is model-authored free text from a previous RCA. Do not
+		// feed it back into the answer prompt or number allowlist.
 		facts.Values = append(facts.Values, Fact{
 			"incident " + incident.CorrelationID,
-			strings.TrimSpace(fmt.Sprintf("%s (%s) %s", incident.RootCause, incident.Decision, formatInstant(incident.OpenedAt))),
+			strings.TrimSpace(fmt.Sprintf("%s %s", incident.Decision, formatInstant(incident.OpenedAt))),
 		})
 	}
 	facts.Values = append(facts.Values, Fact{"incidents listed", strconv.Itoa(len(data.Incidents))})
@@ -360,7 +362,7 @@ func recentIncidentsFacts(facts *Facts, data RecentIncidents) {
 // should never have to wonder whether they are looking at one figure or
 // two.
 func formatBurnRate(value float64) string {
-	if math.IsNaN(value) || math.IsInf(value, 0) || value >= math.MaxFloat64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return "n/a"
 	}
 	return strconv.FormatFloat(value, 'f', 1, 64) + "x"
@@ -370,7 +372,7 @@ func formatBurnRate(value float64) string {
 // negative error budget means it is already overspent, and rounding that
 // away to zero would turn a breach into a near-miss.
 func formatPercent(fraction float64) string {
-	if math.IsNaN(fraction) || math.IsInf(fraction, 0) || math.Abs(fraction) >= math.MaxFloat64 {
+	if math.IsNaN(fraction) || math.IsInf(fraction, 0) {
 		return "n/a"
 	}
 	return strconv.FormatFloat(fraction*100, 'f', 1, 64) + "%"
@@ -386,15 +388,22 @@ func formatScore(value float64) string {
 
 // formatWindow renders a lookback duration the way an SLO config would
 // write it: "15m", not Go's "15m0s". The window appears in every answer,
-// so it is worth the two lines to stop it reading like a debug print.
+// so it must not be shortened by suffix tricks that corrupt common values
+// like 30m0s into "3".
 func formatWindow(d time.Duration) string {
-	text := d.String()
-	text = strings.TrimSuffix(text, "0s")
-	text = strings.TrimSuffix(text, "0m")
-	if text == "" {
-		return d.String()
+	if d == 0 {
+		return "0s"
 	}
-	return text
+	if d%time.Hour == 0 {
+		return strconv.FormatInt(int64(d/time.Hour), 10) + "h"
+	}
+	if d%time.Minute == 0 {
+		return strconv.FormatInt(int64(d/time.Minute), 10) + "m"
+	}
+	if d%time.Second == 0 {
+		return strconv.FormatInt(int64(d/time.Second), 10) + "s"
+	}
+	return d.String()
 }
 
 func formatInstant(t time.Time) string {

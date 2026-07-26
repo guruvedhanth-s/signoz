@@ -104,7 +104,7 @@ func TestHallucinatedNumberFallsBackToTemplate(t *testing.T) {
 
 func TestFaithfulWordingIsUsed(t *testing.T) {
 	stub := &stubWordsmith{
-		reply: "checkout-api / production is unhealthy: availability SLI 44.0% against a 95.0% target, burn 11.2x, budget -1020.0%. Telemetry trusted. Window 1h, evaluated 2026-07-26 11:00-12:00 UTC.",
+		reply: "checkout-api / production is unhealthy: availability SLI 44.0% against a 95.0% target, burn 11.2x, budget -1020.0%. Telemetry trusted. Window 1h.",
 	}
 	answer := Compose(context.Background(), Composer{Wordsmith: stub}, statusEnvelope())
 	if answer.Source != SourceLLM {
@@ -150,6 +150,7 @@ func TestWordsmithFailureDegrades(t *testing.T) {
 // AC: an indeterminate result renders as an explicit refusal with its
 // reason, and no number is stated.
 func TestIndeterminateRefusesWithoutNumbers(t *testing.T) {
+	stub := &stubWordsmith{reply: "checkout-api looks healthy overall, though the data was patchy over 1h."}
 	env := Envelope[SLOStatus]{
 		Intent: "slo_status",
 		Status: StatusIndeterminate,
@@ -167,7 +168,10 @@ func TestIndeterminateRefusesWithoutNumbers(t *testing.T) {
 		t.Fatalf("indeterminate facts carry %d values; a refusal must arrive with nothing to quote: %+v",
 			len(facts.Values), facts.Values)
 	}
-	answer := Compose(context.Background(), Composer{}, env)
+	answer := Compose(context.Background(), Composer{Wordsmith: stub}, env)
+	if stub.seen != "" {
+		t.Fatal("indeterminate answers must not call the Wordsmith")
+	}
 	for _, forbidden := range []string{"44.0%", "11.2x", "0.44"} {
 		if strings.Contains(answer.Text, forbidden) {
 			t.Errorf("refusal states the number %q:\n%s", forbidden, answer.Text)
@@ -271,13 +275,15 @@ func TestVerifyNumbersAcceptsRestyledSupplied(t *testing.T) {
 		"burn 11.2x over 1h":            true,  // exact
 		"burn 11.20x over 1h":           true,  // trailing zero
 		"SLI 44.0%":                     true,  // exact
-		"evaluated 2026-07-26 11:00":    true,  // from the range
+		"evaluated 2026-07-26 11:00":    false, // clock digits are not quotable facts
 		"budget is 5% left":             false, // never computed
 		"3 SLOs are unhealthy":          false, // count not supplied as 3
 		"burn 11.3x":                    false, // near-miss is still invented
 		"the service is unhealthy":      true,  // no numbers at all
 		"burn rate -11.2x":              false, // sign flip changes the claim
 		"1 SLO evaluated over 1h at 44": true,  // 1 and 44 both supplied
+		"SLI is ９９.９%":                  false, // non-ASCII digits are rejected
+		"1,000 requests failed":         false, // comma groups stay one numeric claim
 	}
 	for candidate, wantOK := range cases {
 		err := VerifyNumbers(candidate, facts)
