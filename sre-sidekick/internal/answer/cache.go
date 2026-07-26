@@ -2,6 +2,8 @@ package answer
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -132,11 +134,14 @@ func WithCache[In Args, Out any](t Tool[In, Out], cache *Cache) Tool[In, Out] {
 		return t
 	}
 	inner := t.fn
+	if inner == nil {
+		return t
+	}
 	t.fn = func(ctx context.Context, in In) (Envelope[Out], error) {
 		key := t.toolName + "\x00" + in.CacheKey()
 		if hit, ok := cache.get(key); ok {
 			if env, ok := hit.(Envelope[Out]); ok {
-				return env, nil
+				return cloneEnvelope(env)
 			}
 		}
 		env, err := inner(ctx, in)
@@ -148,8 +153,24 @@ func WithCache[In Args, Out any](t Tool[In, Out], cache *Cache) Tool[In, Out] {
 		// in exactly one field, which is the kind of subtle inconsistency
 		// a test catches long after it starts mattering.
 		env.Intent = t.toolName
-		cache.put(key, env)
-		return env, nil
+		cached, err := cloneEnvelope(env)
+		if err != nil {
+			return env, err
+		}
+		cache.put(key, cached)
+		return cloneEnvelope(env)
 	}
 	return t
+}
+
+func cloneEnvelope[Out any](env Envelope[Out]) (Envelope[Out], error) {
+	var cloned Envelope[Out]
+	buf, err := json.Marshal(env)
+	if err != nil {
+		return cloned, fmt.Errorf("answer: clone cached envelope: %w", err)
+	}
+	if err := json.Unmarshal(buf, &cloned); err != nil {
+		return cloned, fmt.Errorf("answer: clone cached envelope: %w", err)
+	}
+	return cloned, nil
 }

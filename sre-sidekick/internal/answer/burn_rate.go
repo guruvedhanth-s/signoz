@@ -185,6 +185,9 @@ func gateTrust(ctx context.Context, deps Deps, cfg slo.Config, window time.Durat
 	var reasons, warnings []string
 	evaluated := false
 	for _, definition := range cfg.SLOs {
+		if !definition.RequiresCompleteness && definition.Type != slo.SLITypeCompleteness {
+			continue
+		}
 		dependencies := definition.Dependencies
 		if len(dependencies) == 0 && cfg.Completeness != nil {
 			dependencies = cfg.Completeness.ExpectedMetrics

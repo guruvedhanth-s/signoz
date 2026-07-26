@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/slo"
@@ -26,8 +27,8 @@ type SLOState struct {
 	// EvaluatedStart/End are per-SLO because a config may mix windows, in
 	// which case the Envelope's own range spans them all and its Window is
 	// empty. An answer about a specific SLO should cite these.
-	EvaluatedStart string         `json:"evaluated_start,omitempty"`
-	EvaluatedEnd   string         `json:"evaluated_end,omitempty"`
+	EvaluatedStart *time.Time     `json:"evaluated_start,omitempty"`
+	EvaluatedEnd   *time.Time     `json:"evaluated_end,omitempty"`
 	Trust          slo.GateResult `json:"trust"`
 	Warning        string         `json:"warning,omitempty"`
 	Error          string         `json:"error,omitempty"`
@@ -79,7 +80,7 @@ func SLOStatusTool(deps Deps) Tool[SLOArgs, SLOStatus] {
 			// the reply can explain precisely what was untrusted rather
 			// than going quiet. The numbers stay attached to a verdict
 			// that forbids quoting them as fact.
-			if !anyTrusted(reports) {
+			if result.Trust == nil || !result.Trust.Trusted {
 				result.Status = StatusIndeterminate
 				result.Reason = untrustedReason(reports)
 			}
@@ -103,17 +104,19 @@ func sloStateFromReport(report slo.Report) SLOState {
 		Error:                report.Error,
 	}
 	if !report.EvaluatedStart.IsZero() {
-		state.EvaluatedStart = report.EvaluatedStart.UTC().Format("2006-01-02T15:04:05Z")
+		start := report.EvaluatedStart.UTC()
+		state.EvaluatedStart = &start
 	}
 	if !report.EvaluatedEnd.IsZero() {
-		state.EvaluatedEnd = report.EvaluatedEnd.UTC().Format("2006-01-02T15:04:05Z")
+		end := report.EvaluatedEnd.UTC()
+		state.EvaluatedEnd = &end
 	}
 	return state
 }
 
 func anyTrusted(reports []slo.Report) bool {
 	for _, report := range reports {
-		if report.Gate.Trusted && report.State != slo.StateIndeterminate {
+		if report.Gate.Trusted {
 			return true
 		}
 	}

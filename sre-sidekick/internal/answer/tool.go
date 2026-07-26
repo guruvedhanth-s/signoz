@@ -43,6 +43,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -93,6 +94,29 @@ type Envelope[T any] struct {
 	// Data is the typed result. Never a string, never a formatted
 	// sentence: the composer must receive values it cannot have invented.
 	Data T `json:"data"`
+}
+
+func (e Envelope[T]) MarshalJSON() ([]byte, error) {
+	type envelopeJSON struct {
+		Intent         string          `json:"intent"`
+		Status         Status          `json:"status"`
+		Reason         string          `json:"reason,omitempty"`
+		Window         string          `json:"window,omitempty"`
+		EvaluatedStart *time.Time      `json:"evaluated_start,omitempty"`
+		EvaluatedEnd   *time.Time      `json:"evaluated_end,omitempty"`
+		Trust          *slo.GateResult `json:"trust,omitempty"`
+		Data           T               `json:"data"`
+	}
+	out := envelopeJSON{Intent: e.Intent, Status: e.Status, Reason: e.Reason, Window: e.Window, Trust: e.Trust, Data: e.Data}
+	if !e.EvaluatedStart.IsZero() {
+		start := e.EvaluatedStart
+		out.EvaluatedStart = &start
+	}
+	if !e.EvaluatedEnd.IsZero() {
+		end := e.EvaluatedEnd
+		out.EvaluatedEnd = &end
+	}
+	return json.Marshal(out)
 }
 
 // Args is the closed input shape a tool accepts. Every implementation
@@ -175,6 +199,13 @@ func (t Tool[In, Out]) invokeJSON(ctx context.Context, raw json.RawMessage) (any
 		decoder := json.NewDecoder(strings.NewReader(string(raw)))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&in); err != nil {
+			return nil, fmt.Errorf("answer: invalid arguments for %q: %w", t.toolName, err)
+		}
+		var trailing json.RawMessage
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				err = fmt.Errorf("trailing JSON value")
+			}
 			return nil, fmt.Errorf("answer: invalid arguments for %q: %w", t.toolName, err)
 		}
 	}

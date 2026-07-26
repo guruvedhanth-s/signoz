@@ -236,7 +236,7 @@ func TestErrorBudgetReportsRemainingAndExhaustion(t *testing.T) {
 	if budget.Remaining >= 0 {
 		t.Errorf("remaining = %v, want negative (budget overspent at 10%% errors)", budget.Remaining)
 	}
-	if budget.EvaluatedStart == "" || budget.EvaluatedEnd == "" {
+	if budget.EvaluatedStart == nil || budget.EvaluatedEnd == nil {
 		t.Error("budget entry lacks its evaluated range")
 	}
 	if len(got.Data.Exhausted) != 1 {

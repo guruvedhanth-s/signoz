@@ -2,6 +2,7 @@ package answer
 
 import (
 	"context"
+	"time"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/slo"
 )
@@ -18,8 +19,8 @@ type BudgetEntry struct {
 	SLI            float64        `json:"sli"`
 	Target         float64        `json:"target"`
 	State          slo.State      `json:"state"`
-	EvaluatedStart string         `json:"evaluated_start,omitempty"`
-	EvaluatedEnd   string         `json:"evaluated_end,omitempty"`
+	EvaluatedStart *time.Time     `json:"evaluated_start,omitempty"`
+	EvaluatedEnd   *time.Time     `json:"evaluated_end,omitempty"`
 	Trust          slo.GateResult `json:"trust"`
 }
 
@@ -66,10 +67,12 @@ func ErrorBudgetTool(deps Deps) Tool[SLOArgs, ErrorBudget] {
 					Trust:     report.Gate,
 				}
 				if !report.EvaluatedStart.IsZero() {
-					entry.EvaluatedStart = report.EvaluatedStart.UTC().Format("2006-01-02T15:04:05Z")
+					start := report.EvaluatedStart.UTC()
+					entry.EvaluatedStart = &start
 				}
 				if !report.EvaluatedEnd.IsZero() {
-					entry.EvaluatedEnd = report.EvaluatedEnd.UTC().Format("2006-01-02T15:04:05Z")
+					end := report.EvaluatedEnd.UTC()
+					entry.EvaluatedEnd = &end
 				}
 				// Only a trusted, determinate report can be called
 				// exhausted. An indeterminate SLO has no budget position
@@ -92,7 +95,7 @@ func ErrorBudgetTool(deps Deps) Tool[SLOArgs, ErrorBudget] {
 				},
 			}
 			provenance(&result, reports)
-			if !anyTrusted(reports) {
+			if result.Trust == nil || !result.Trust.Trusted {
 				result.Status = StatusIndeterminate
 				result.Reason = untrustedReason(reports)
 			}

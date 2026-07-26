@@ -90,7 +90,7 @@ var ErrNoScope = errors.New("no service/environment scope for this question")
 func (r PatternResolver) Resolve(_ context.Context, question string, scope ServiceArgs) (Intent, error) {
 	normalized := normalizeQuestion(question)
 	for _, pattern := range intentPatterns {
-		if !containsAny(normalized, pattern.keywords) {
+		if !containsAnyKeyword(normalized, pattern.keywords) {
 			continue
 		}
 		if r.Registry != nil && !r.registered(pattern.intent) {
@@ -130,13 +130,15 @@ func (r PatternResolver) buildIntent(name, normalized string, scope ServiceArgs)
 		return Intent{Name: name, Args: raw}, nil
 	}
 
-	resolved := r.resolveScope(normalized, scope)
+	resolved, err := r.resolveScope(normalized, scope)
+	if err != nil {
+		return Intent{}, err
+	}
 	if err := resolved.Validate(); err != nil {
 		return Intent{}, fmt.Errorf("%w: %v", ErrNoScope, err)
 	}
 
 	var raw []byte
-	var err error
 	switch name {
 	case "recent_incidents":
 		raw, err = json.Marshal(HistoryArgs{Service: resolved.Service, Environment: resolved.Environment})
@@ -156,24 +158,38 @@ func (r PatternResolver) buildIntent(name, normalized string, scope ServiceArgs)
 // caller's session scope - never a fragment of the question itself. A
 // service named in the question wins over the session default, because
 // naming one is an explicit override.
-func (r PatternResolver) resolveScope(normalized string, scope ServiceArgs) ServiceArgs {
+func (r PatternResolver) resolveScope(normalized string, scope ServiceArgs) (ServiceArgs, error) {
 	best := scope
+	matchedService := ""
+	matchedEnv := ""
 	for _, entry := range r.KnownServices {
 		if entry.Service == "" || !containsWord(normalized, strings.ToLower(entry.Service)) {
 			continue
 		}
+		matchedService = entry.Service
 		best.Service = entry.Service
-		// Adopt the environment too, unless the question also names a
-		// different one for the same service.
-		if best.Environment == "" || !r.serviceHasEnvironment(entry.Service, best.Environment) {
-			best.Environment = entry.Environment
-		}
 		if containsWord(normalized, strings.ToLower(entry.Environment)) {
+			matchedEnv = entry.Environment
 			best.Environment = entry.Environment
 			break
 		}
 	}
-	return best
+	if matchedService != "" && matchedEnv == "" {
+		envs := map[string]struct{}{}
+		for _, entry := range r.KnownServices {
+			if entry.Service == matchedService {
+				envs[entry.Environment] = struct{}{}
+			}
+		}
+		if len(envs) == 1 {
+			for env := range envs {
+				best.Environment = env
+			}
+		} else if len(envs) > 1 && (scope.Environment == "" || !r.serviceHasEnvironment(matchedService, scope.Environment)) {
+			return ServiceArgs{}, fmt.Errorf("%w: service %q is registered in multiple environments", ErrNoScope, matchedService)
+		}
+	}
+	return best, nil
 }
 
 func (r PatternResolver) serviceHasEnvironment(service, environment string) bool {
@@ -237,7 +253,7 @@ func normalizeQuestion(question string) string {
 	lastSpace := false
 	for _, r := range strings.ToLower(question) {
 		switch {
-		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.':
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' || r == '/' || r == ':':
 			b.WriteRune(r)
 			lastSpace = false
 		default:
@@ -250,9 +266,15 @@ func normalizeQuestion(question string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func containsAny(haystack string, needles []string) bool {
+func containsAnyKeyword(haystack string, needles []string) bool {
 	for _, needle := range needles {
-		if strings.Contains(haystack, needle) {
+		if strings.Contains(needle, " ") {
+			if strings.Contains(haystack, needle) {
+				return true
+			}
+			continue
+		}
+		if containsWord(haystack, needle) {
 			return true
 		}
 	}

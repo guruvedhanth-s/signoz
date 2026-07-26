@@ -47,6 +47,13 @@ type TelemetryTrust struct {
 // severityRank orders findings by how much they should worry the reader.
 var severityRank = map[string]int{"blocker": 0, "warning": 1, "info": 2}
 
+func rankSeverity(severity string) int {
+	if rank, ok := severityRank[severity]; ok {
+		return rank
+	}
+	return len(severityRank)
+}
+
 // TelemetryTrustTool answers whether the telemetry behind every other
 // answer is trustworthy: the Track A audit score, coverage, and the
 // findings that failed.
@@ -106,7 +113,7 @@ func TelemetryTrustTool(deps Deps) Tool[ServiceArgs, TelemetryTrust] {
 				})
 			}
 			sort.SliceStable(failed, func(i, j int) bool {
-				return severityRank[failed[i].Severity] < severityRank[failed[j].Severity]
+				return rankSeverity(failed[i].Severity) < rankSeverity(failed[j].Severity)
 			})
 
 			// Trust here is derived entirely from the audit's own numbers -
