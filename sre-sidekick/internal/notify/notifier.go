@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mutation"
 )
 
 // Status is the outcome of a diagnosis attempt.
@@ -206,7 +208,9 @@ type Diagnosis struct {
 	// Reversible flags whether ProposedFix is a reversible action; PRD
 	// section 15 requires irreversible actions to be labeled and to demand
 	// stronger confirmation.
-	Reversible bool `json:"reversible,omitempty"`
+	Reversible   bool              `json:"reversible,omitempty"`
+	Mutation     *mutation.Request `json:"mutation,omitempty"`
+	MutationDiff *mutation.Diff    `json:"mutationDiff,omitempty"`
 
 	// Candidates is set instead of RootCause/ProposedFix when the evidence
 	// supports more than one cause: the presentation rules (PRD section

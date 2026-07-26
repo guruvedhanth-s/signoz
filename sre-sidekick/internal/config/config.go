@@ -178,6 +178,7 @@ type SlackConfig struct {
 	SessionStorePath string              `yaml:"session_store_path" json:"session_store_path"`
 	AuditLogPath     string              `yaml:"audit_log_path" json:"audit_log_path"`
 	Authorization    AuthorizationConfig `yaml:"authorization" json:"authorization"`
+	EnableMutations  bool                `yaml:"enable_mutations" json:"enable_mutations"`
 	// ChannelServices maps a Slack channel id (e.g. "C01ABC123") to the
 	// service a question asked in that channel is about, so "@sidekick how
 	// are we doing?" in an incident channel needs no service named.

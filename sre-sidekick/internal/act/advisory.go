@@ -26,6 +26,15 @@ var _ slack.Actuator = (*AdvisoryActuator)(nil)
 // advisory proposal cannot fail in a way that should block the decision
 // already made in Slack.
 func (a *AdvisoryActuator) Act(_ context.Context, req slack.ActionRequest) (slack.ActionResult, error) {
+	if req.Mutation != nil {
+		if err := req.Mutation.Validate(); err != nil {
+			return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: err.Error()}, nil
+		}
+		if !req.Execute {
+			return slack.ActionResult{Outcome: slack.OutcomeRecorded, Detail: "mutation preview recorded; execution is disabled by configuration"}, nil
+		}
+		return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: "mutation execution backend is not configured"}, nil
+	}
 	a.logger().Info("advisory action recorded",
 		"correlation_id", req.CorrelationID,
 		"service", req.Service,

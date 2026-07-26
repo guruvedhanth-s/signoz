@@ -12,6 +12,7 @@ import (
 
 	"github.com/slack-go/slack"
 
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mutation"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca/limits"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/session"
@@ -30,15 +31,16 @@ import (
 //   - It does not act. An approval is recorded with who approved it and when,
 //     and the human performs the fix by hand (PRD sections 5.6, 15).
 type Coordinator struct {
-	client     *Client
-	sessions   *session.Manager
-	rca        RCA
-	copilot    Copilot
-	actuator   Actuator
-	authorizer Authorizer
-	auditor    session.Auditor
-	logger     *slog.Logger
-	metrics    *Metrics
+	client          *Client
+	sessions        *session.Manager
+	rca             RCA
+	actuator        Actuator
+	authorizer      Authorizer
+	auditor         session.Auditor
+	logger          *slog.Logger
+	metrics         *Metrics
+	mutationEnabled bool
+	copilot         Copilot
 
 	defaultEnvironment string
 	// channelServices maps a Slack channel id to the service a question
@@ -102,6 +104,12 @@ func WithCoordinatorAuthorizer(authorizer Authorizer) CoordinatorOption {
 // the Slack coordinator to a database implementation.
 func WithCoordinatorAuditor(auditor session.Auditor) CoordinatorOption {
 	return func(c *Coordinator) { c.auditor = auditor }
+}
+
+// WithCoordinatorMutationExecution enables the explicitly opt-in mutation
+// executor. The zero value remains preview/advisory-only.
+func WithCoordinatorMutationExecution(enabled bool) CoordinatorOption {
+	return func(c *Coordinator) { c.mutationEnabled = enabled }
 }
 
 // WithCopilot attaches the deterministic tool surface that answers
@@ -268,6 +276,11 @@ func (c *Coordinator) decide(
 	if !ok {
 		return
 	}
+	if kind == session.DecisionApproved && s.Diagnosis().Mutation != nil {
+		if _, ok := c.authorize(ctx, s, in, RoleOperator); !ok {
+			return
+		}
+	}
 	accepted, existing, err := c.sessions.Decide(s, session.Decision{
 		Kind:              kind,
 		UserID:            in.UserID,
@@ -336,6 +349,9 @@ func (c *Coordinator) act(ctx context.Context, s *session.Session) {
 		Environment:   s.Environment,
 		ProposedFix:   d.ProposedFix,
 		Reversible:    d.Reversible,
+		Mutation:      d.Mutation,
+		Preview:       valueOrEmptyDiff(d.MutationDiff),
+		Execute:       c.mutationEnabled,
 	})
 	if err != nil {
 		c.logger.Error("actuator failed",
@@ -343,6 +359,26 @@ func (c *Coordinator) act(ctx context.Context, s *session.Session) {
 		return
 	}
 	c.metrics.ActionRecorded(ctx, s.Service, s.Environment, "advisory", result.Outcome)
+	actor := ""
+	if decision := s.Decision(); decision != nil {
+		actor = decision.UserID
+	}
+	c.audit(session.AuditEvent{Type: "mutation_action", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: actor, Payload: actionAuditPayload(d, result)})
+}
+
+func valueOrEmptyDiff(diff *mutation.Diff) mutation.Diff {
+	if diff == nil {
+		return mutation.Diff{}
+	}
+	return *diff
+}
+
+func actionAuditPayload(d notify.Diagnosis, result ActionResult) string {
+	payload, err := json.Marshal(map[string]any{"mutation": d.Mutation, "preview": d.MutationDiff, "outcome": result.Outcome, "detail": result.Detail})
+	if err != nil {
+		return `{"outcome":"audit_encode_failed"}`
+	}
+	return string(payload)
 }
 
 // verify handles the "Verify recovery" button (PRD section 16): it

@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mutation"
 )
 
 // Actuator executes (or, in the advisory MVP, records) an approved
@@ -26,6 +27,9 @@ type ActionRequest struct {
 	// labeled and, in an executing adapter, would demand stronger
 	// confirmation before it runs (PRD section 15).
 	Reversible bool
+	Mutation   *mutation.Request
+	Preview    mutation.Diff
+	Execute    bool
 }
 
 // ActionResult is what the Actuator did (or recorded) with the proposal.
@@ -42,6 +46,8 @@ const (
 	// the proposal was logged for audit, and a human performs the fix by
 	// hand. An executing adapter would add OutcomeExecuted/OutcomeFailed.
 	OutcomeRecorded = "recorded"
+	OutcomeFailed   = "failed"
+	OutcomeExecuted = "executed"
 )
 
 // NoopActuator is the default Actuator: it records nothing beyond what the

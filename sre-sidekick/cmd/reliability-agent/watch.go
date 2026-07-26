@@ -212,6 +212,7 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		sidekickslack.WithMaxConcurrentAnalysis(cfg.MaxConcurrentRCA),
 		sidekickslack.WithCoordinatorMetrics(metrics),
 		sidekickslack.WithCoordinatorActuator(actuator),
+		sidekickslack.WithCoordinatorMutationExecution(cfg.EnableMutations),
 		sidekickslack.WithCoordinatorAuthorizer(authorizer),
 		sidekickslack.WithCoordinatorAuditor(auditor),
 		sidekickslack.WithCopilot(copilot),

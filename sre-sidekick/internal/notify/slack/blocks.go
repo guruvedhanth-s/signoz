@@ -262,10 +262,19 @@ const irreversibleMarker = ":warning: *irreversible*"
 
 func proposedFixBlocks(d notify.Diagnosis) []slack.Block {
 	fix := strings.TrimSpace(d.ProposedFix)
-	if fix == "" {
+	if fix == "" && d.MutationDiff == nil {
 		return nil
 	}
-	text := "*Recommended action* (advisory - the sidekick will not run it)\n" + escape(fix)
+	text := "*Recommended action*"
+	if fix != "" {
+		text += "\n" + escape(fix)
+	}
+	if d.MutationDiff != nil {
+		text += "\n*Mutation preview*\nTarget: " + escape(d.MutationDiff.Target) +
+			"\nBefore: " + escape(d.MutationDiff.Before) +
+			"\nAfter: " + escape(d.MutationDiff.After) +
+			"\nExecution is disabled by default; approval is required and recorded."
+	}
 	if !d.Reversible {
 		// PRD section 15: irreversible actions must be labeled and demand
 		// stronger confirmation.
@@ -306,6 +315,9 @@ func actionBlock(d notify.Diagnosis, indeterminate bool) slack.Block {
 }
 
 func hasDecidableFix(d notify.Diagnosis) bool {
+	if d.Mutation != nil && d.MutationDiff != nil {
+		return true
+	}
 	if strings.TrimSpace(d.ProposedFix) != "" {
 		return true
 	}
