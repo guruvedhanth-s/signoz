@@ -170,9 +170,9 @@ func (m *Manager) Open(req OpenRequest) (*Session, bool, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if existing, ok := m.byFingerprint[fingerprint]; ok {
+		m.mu.Unlock()
 		return existing, true, nil
 	}
 
@@ -194,9 +194,13 @@ func (m *Manager) Open(req OpenRequest) (*Session, bool, error) {
 
 	m.byThread[threadKey(channel, thread)] = created
 	m.byFingerprint[fingerprint] = created
-	if err := m.store.Save(created.View()); err != nil {
+	snapshot := created.viewLocked()
+	m.mu.Unlock()
+	if err := m.persistView(snapshot); err != nil {
+		m.mu.Lock()
 		delete(m.byThread, threadKey(channel, thread))
 		delete(m.byFingerprint, fingerprint)
+		m.mu.Unlock()
 		return nil, false, fmt.Errorf("session: persist open: %w", err)
 	}
 	return created, false, nil
@@ -236,9 +240,28 @@ func (m *Manager) ByThread(channelID, threadTS string) (*Session, bool) {
 // resolution is a new incident and gets a new thread.
 func (m *Manager) ByFingerprint(fingerprint string) (*Session, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	found, ok := m.byFingerprint[strings.TrimSpace(fingerprint)]
-	return found, ok
+	m.mu.RUnlock()
+	if ok {
+		return found, true
+	}
+	if m.store == nil {
+		return nil, false
+	}
+	view, err := m.store.LoadByFingerprint(strings.TrimSpace(fingerprint))
+	if err != nil {
+		return nil, false
+	}
+	rehydrated := sessionFromView(view)
+	m.mu.Lock()
+	if existing, exists := m.byFingerprint[rehydrated.Fingerprint]; exists {
+		m.mu.Unlock()
+		return existing, true
+	}
+	m.byThread[threadKey(rehydrated.ChannelID, rehydrated.ThreadTS)] = rehydrated
+	m.byFingerprint[rehydrated.Fingerprint] = rehydrated
+	m.mu.Unlock()
+	return rehydrated, true
 }
 
 // Len reports how many sessions are addressable, open and recently closed.
@@ -276,10 +299,10 @@ func (m *Manager) AppendTurn(s *Session, turn Turn) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.status.Terminal() {
-		return fmt.Errorf("%w: %s", ErrSessionClosed, s.status)
+		status := s.status
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSessionClosed, status)
 	}
 	if turn.At.IsZero() {
 		turn.At = m.now()
@@ -289,7 +312,9 @@ func (m *Manager) AppendTurn(s *Session, turn Turn) error {
 		s.participants[string(turn.Actor)] = struct{}{}
 	}
 	s.lastActivity = m.now()
-	return m.persist(s)
+	snapshot := s.viewLocked()
+	s.mu.Unlock()
+	return m.persistView(snapshot)
 }
 
 // AddEvidence records evidence gathered after the diagnosis to answer a
@@ -300,17 +325,20 @@ func (m *Manager) AddEvidence(s *Session, evidence ...notify.Evidence) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.status.Terminal() {
-		return fmt.Errorf("%w: %s", ErrSessionClosed, s.status)
+		status := s.status
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSessionClosed, status)
 	}
 	if len(s.extraEvidence)+len(evidence) > m.extraEvidenceBudget {
+		s.mu.Unlock()
 		return fmt.Errorf("%w: limit %d", ErrEvidenceBudget, m.extraEvidenceBudget)
 	}
 	s.extraEvidence = append(s.extraEvidence, evidence...)
 	s.lastActivity = m.now()
-	return m.persist(s)
+	snapshot := s.viewLocked()
+	s.mu.Unlock()
+	return m.persistView(snapshot)
 }
 
 // Decide records a terminal human judgement and closes the session.
@@ -354,10 +382,11 @@ func (m *Manager) Decide(s *Session, decision Decision) (bool, *Decision, error)
 		s.participants[user] = struct{}{}
 	}
 	fingerprint := s.Fingerprint
+	snapshot := s.viewLocked()
 	s.mu.Unlock()
 
 	m.unindexFingerprint(fingerprint, s)
-	if err := m.persist(s); err != nil {
+	if err := m.persistView(snapshot); err != nil {
 		return false, nil, fmt.Errorf("session: persist decision: %w", err)
 	}
 	return true, &recorded, nil
@@ -388,10 +417,11 @@ func (m *Manager) Close(s *Session, reason CloseReason) error {
 	s.closedAt = now
 	s.lastActivity = now
 	fingerprint := s.Fingerprint
+	snapshot := s.viewLocked()
 	s.mu.Unlock()
 
 	m.unindexFingerprint(fingerprint, s)
-	return m.persist(s)
+	return m.persistView(snapshot)
 }
 
 // Touch refreshes the idle clock without recording a turn, e.g. when an alert
@@ -401,11 +431,14 @@ func (m *Manager) Touch(s *Session) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.status.Terminal() {
 		s.lastActivity = m.now()
-		_ = m.persist(s)
+		snapshot := s.viewLocked()
+		s.mu.Unlock()
+		_ = m.persistView(snapshot)
+		return
 	}
+	s.mu.Unlock()
 }
 
 // ReapIdle closes sessions that have been idle past the TTL and forgets closed
@@ -445,7 +478,7 @@ func (m *Manager) ReapIdle() []*Session {
 		}
 		candidate.mu.Unlock()
 		if candidate.Status().Terminal() {
-			_ = m.persist(candidate)
+			_ = m.persistView(candidate.View())
 		}
 	}
 
@@ -463,16 +496,21 @@ func (m *Manager) ReapIdle() []*Session {
 			}
 		}
 		m.mu.Unlock()
+		for _, session := range forget {
+			if m.store != nil {
+				_ = m.store.Delete(session.ChannelID, session.ThreadTS)
+			}
+		}
 	}
 
 	return expired
 }
 
-func (m *Manager) persist(s *Session) error {
+func (m *Manager) persistView(snapshot View) error {
 	if m.store == nil {
 		return nil
 	}
-	return m.store.Save(s.View())
+	return m.store.Save(snapshot)
 }
 
 func sessionFromView(v View) *Session {

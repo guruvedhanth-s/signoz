@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,13 +57,34 @@ func (s *PostgresStore) Save(v View) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO sidekick_sessions(channel_id, thread_ts, snapshot) VALUES($1,$2,$3)
+	ctx, cancel := dbContext()
+	defer cancel()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO sidekick_sessions(channel_id, thread_ts, snapshot) VALUES($1,$2,$3)
 		ON CONFLICT(channel_id, thread_ts) DO UPDATE SET snapshot=EXCLUDED.snapshot, updated_at=NOW()`, v.ChannelID, v.ThreadTS, b)
 	return err
 }
 func (s *PostgresStore) Load(channelID, threadTS string) (View, error) {
 	var b []byte
-	err := s.db.QueryRow(`SELECT snapshot FROM sidekick_sessions WHERE channel_id=$1 AND thread_ts=$2`, channelID, threadTS).Scan(&b)
+	ctx, cancel := dbContext()
+	defer cancel()
+	err := s.db.QueryRowContext(ctx, `SELECT snapshot FROM sidekick_sessions WHERE channel_id=$1 AND thread_ts=$2`, channelID, threadTS).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return View{}, ErrNotFound
+	}
+	if err != nil {
+		return View{}, err
+	}
+	var v View
+	if err := json.Unmarshal(b, &v); err != nil {
+		return View{}, err
+	}
+	return v, nil
+}
+func (s *PostgresStore) LoadByFingerprint(fingerprint string) (View, error) {
+	var b []byte
+	ctx, cancel := dbContext()
+	defer cancel()
+	err := s.db.QueryRowContext(ctx, `SELECT snapshot FROM sidekick_sessions WHERE snapshot->>'fingerprint'=$1 AND snapshot->>'status'='open' LIMIT 1`, fingerprint).Scan(&b)
 	if errors.Is(err, sql.ErrNoRows) {
 		return View{}, ErrNotFound
 	}
@@ -75,7 +98,9 @@ func (s *PostgresStore) Load(channelID, threadTS string) (View, error) {
 	return v, nil
 }
 func (s *PostgresStore) Delete(channelID, threadTS string) error {
-	_, err := s.db.Exec(`DELETE FROM sidekick_sessions WHERE channel_id=$1 AND thread_ts=$2`, channelID, threadTS)
+	ctx, cancel := dbContext()
+	defer cancel()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sidekick_sessions WHERE channel_id=$1 AND thread_ts=$2`, channelID, threadTS)
 	return err
 }
 func (s *PostgresStore) Close() error { return s.db.Close() }
@@ -88,12 +113,22 @@ func (a *PostgresAuditor) Append(event AuditEvent) error {
 		event.At = time.Now().UTC()
 	}
 	if event.ID == "" {
-		event.ID = fmt.Sprintf("%d", event.At.UnixNano())
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			return err
+		}
+		event.ID = hex.EncodeToString(id[:])
 	}
 	payload := event.Payload
 	if payload == "" {
 		payload = "{}"
 	}
-	_, err := a.db.Exec(`INSERT INTO sidekick_audit_events(id,event_type,correlation_id,service,environment,actor,occurred_at,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO NOTHING`, event.ID, event.Type, event.CorrelationID, event.Service, event.Environment, event.Actor, event.At, []byte(payload))
+	ctx, cancel := dbContext()
+	defer cancel()
+	_, err := a.db.ExecContext(ctx, `INSERT INTO sidekick_audit_events(id,event_type,correlation_id,service,environment,actor,occurred_at,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO NOTHING`, event.ID, event.Type, event.CorrelationID, event.Service, event.Environment, event.Actor, event.At, []byte(payload))
 	return err
+}
+
+func dbContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }

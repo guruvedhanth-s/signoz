@@ -61,7 +61,6 @@ type Config struct {
 
 type StorageConfig struct {
 	Driver string `yaml:"driver" json:"driver"`
-	URL    string `yaml:"url,omitempty" json:"url,omitempty"`
 	URLEnv string `yaml:"url_env,omitempty" json:"url_env,omitempty"`
 }
 
@@ -261,6 +260,19 @@ func (c Config) Validate() error {
 // the Slack section's own validation (and its credential lookups) for
 // callers that do not use it - see LoadForRCA.
 func (c Config) validate(requireSlack bool) error {
+	switch driver := strings.ToLower(strings.TrimSpace(c.Storage.Driver)); driver {
+	case "", "memory":
+	case "file":
+	case "postgres":
+		if strings.TrimSpace(c.Storage.URLEnv) == "" {
+			return fmt.Errorf("storage: url_env is required for postgres")
+		}
+		if strings.TrimSpace(os.Getenv(c.Storage.URLEnv)) == "" {
+			return fmt.Errorf("storage: environment variable %s is required for postgres", c.Storage.URLEnv)
+		}
+	default:
+		return fmt.Errorf("storage: unsupported driver %q (want memory, file, or postgres)", driver)
+	}
 	if requireSlack {
 		if err := c.Notify.Slack.Validate(); err != nil {
 			return fmt.Errorf("notify.slack: %w", err)

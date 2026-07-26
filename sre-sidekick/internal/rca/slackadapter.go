@@ -29,7 +29,8 @@ type SlackAdapter struct {
 	// Window is the lookback window used for evidence gathering when a
 	// human triggers a diagnosis with no window of their own (e.g. via
 	// /diagnose), e.g. "1h".
-	Window string
+	Window         string
+	DefaultChannel string
 	// Now returns the current time; overridable in tests. Defaults to
 	// time.Now.
 	Now func() time.Time
@@ -41,7 +42,11 @@ var _ slack.RCA = (*SlackAdapter)(nil)
 // EvaluateGrounding and runs it through the Agent, the same pipeline
 // `diagnose` and the alert-driven detect stage use.
 func (a *SlackAdapter) Diagnose(ctx context.Context, req slack.DiagnoseRequest) (notify.Diagnosis, error) {
-	ctx = limits.WithIdentity(ctx, req.RequestedBy, "")
+	channelID := req.ChannelID
+	if channelID == "" {
+		channelID = a.DefaultChannel
+	}
+	ctx = limits.WithIdentity(ctx, req.RequestedBy, channelID)
 	grounding, sloName, err := EvaluateGrounding(ctx, a.Metrics, a.SLOConfigPath, req.Service, req.Environment)
 	if err != nil {
 		return notify.Diagnosis{}, fmt.Errorf("rca: ground incident: %w", err)
@@ -91,8 +96,6 @@ func (a *SlackAdapter) AnswerFollowup(ctx context.Context, req slack.FollowupReq
 		ExtraEvidence: req.ExtraEvidence,
 		History:       history,
 		Question:      req.Question,
-		UserID:        req.AskedBy,
-		ChannelID:     req.ChannelID,
 	})
 }
 

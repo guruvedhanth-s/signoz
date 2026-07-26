@@ -36,6 +36,7 @@ type RCA interface {
 type DiagnoseRequest struct {
 	Service     string
 	Environment string
+	ChannelID   string
 	// RequestedBy is the Slack user id that asked, for the audit trail.
 	// Empty for an alert-driven diagnosis - nobody asked, an alert did.
 	RequestedBy string

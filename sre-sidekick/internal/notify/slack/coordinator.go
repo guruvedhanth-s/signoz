@@ -225,7 +225,6 @@ func (c *Coordinator) decide(
 			"This session is already closed, so the decision was not recorded.")
 		return
 	}
-	c.audit(session.AuditEvent{Type: "decision_recorded", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID})
 	if !accepted {
 		// Two people decided at once, or one person double-tapped. The first
 		// decision stands (session design edge case E5).
@@ -235,6 +234,7 @@ func (c *Coordinator) decide(
 		))
 		return
 	}
+	c.audit(session.AuditEvent{Type: "decision_recorded", CorrelationID: s.CorrelationID, Service: s.Service, Environment: s.Environment, Actor: in.UserID, Payload: fmt.Sprintf(`{"decision":%q}`, kind)})
 
 	verb := "approved"
 	detail := "Recorded as approved. Nothing was executed: apply the fix by hand, then verify."
@@ -597,6 +597,7 @@ func (c *Coordinator) OnCommand(ctx context.Context, cmd Command) {
 	diagnosis, err := c.rca.Diagnose(ctx, DiagnoseRequest{
 		Service:     service,
 		Environment: environment,
+		ChannelID:   cmd.ChannelID,
 		RequestedBy: cmd.UserID,
 	})
 	if err != nil {

@@ -133,9 +133,11 @@ func (m *Manager) Allow(ctx context.Context, req Request) error {
 	if req.EstimatedTokens > m.cfg.MaxTokensPerRequest || m.hourRequests+1 > m.cfg.HourlyRequests || m.hourTokens+req.EstimatedTokens > m.cfg.HourlyTokens || m.dayRequests+1 > m.cfg.DailyRequests || m.dayTokens+req.EstimatedTokens > m.cfg.DailyTokens {
 		return ErrBudgetExhausted
 	}
-	if !m.allowKey(m.users, req.UserID, now, m.cfg.PerUserRequests) || !m.allowKey(m.channels, req.ChannelID, now, m.cfg.PerChannelRequests) {
+	if !m.canAllow(m.users, req.UserID, now, m.cfg.PerUserRequests) || !m.canAllow(m.channels, req.ChannelID, now, m.cfg.PerChannelRequests) {
 		return ErrRateLimited
 	}
+	m.recordKey(m.users, req.UserID, now)
+	m.recordKey(m.channels, req.ChannelID, now)
 	m.hourRequests++
 	m.dayRequests++
 	m.hourTokens += req.EstimatedTokens
@@ -144,6 +146,14 @@ func (m *Manager) Allow(ctx context.Context, req Request) error {
 }
 
 func (m *Manager) allowKey(values map[string][]time.Time, key string, now time.Time, max int) bool {
+	if !m.canAllow(values, key, now, max) {
+		return false
+	}
+	m.recordKey(values, key, now)
+	return true
+}
+
+func (m *Manager) canAllow(values map[string][]time.Time, key string, now time.Time, max int) bool {
 	if key == "" {
 		return true
 	}
@@ -159,8 +169,15 @@ func (m *Manager) allowKey(values map[string][]time.Time, key string, now time.T
 		values[key] = kept
 		return false
 	}
-	values[key] = append(kept, now)
+	values[key] = kept
 	return true
+}
+
+func (m *Manager) recordKey(values map[string][]time.Time, key string, now time.Time) {
+	if key == "" {
+		return
+	}
+	values[key] = append(values[key], now)
 }
 
 func (m *Manager) RecordSuccess() { m.mu.Lock(); m.failures = 0; m.mu.Unlock() }

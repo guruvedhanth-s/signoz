@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -353,15 +355,18 @@ func jsonEscape(s string) string {
 // complete performs one chat-completions request and returns the first
 // choice.
 func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allowTools bool) (choice chatChoice, err error) {
+	reservedTokens := estimateMessageTokens(messages) + r.maxTokens()
 	if r.Limits != nil {
 		req := limits.Identity(ctx)
-		req.EstimatedTokens = r.maxTokens()
+		req.EstimatedTokens = reservedTokens
 		if err := r.Limits.Allow(ctx, req); err != nil {
+			slog.Warn("rca LLM request rejected", "reason", err.Error())
 			return chatChoice{}, err
 		}
 	}
 	defer func() {
-		if err != nil && r.Limits != nil {
+		var failure providerFailure
+		if err != nil && r.Limits != nil && errors.As(err, &failure) {
 			r.Limits.RecordFailure()
 		}
 	}()
@@ -389,7 +394,7 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 
 	resp, err := r.httpClient().Do(httpReq)
 	if err != nil {
-		return chatChoice{}, fmt.Errorf("rca: LLM request failed: %w", err)
+		return chatChoice{}, providerFailure{err: fmt.Errorf("rca: LLM request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
@@ -398,7 +403,7 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 		return chatChoice{}, fmt.Errorf("rca: read LLM response: %w", err)
 	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		return chatChoice{}, fmt.Errorf("rca: LLM http %d: %s", resp.StatusCode, bytes.TrimSpace(raw))
+		return chatChoice{}, providerFailure{err: fmt.Errorf("rca: LLM http %d: %s", resp.StatusCode, bytes.TrimSpace(raw))}
 	}
 
 	var parsed chatCompletionResponse
@@ -412,7 +417,7 @@ func (r *LLMReasoner) complete(ctx context.Context, messages []chatMessage, allo
 		return chatChoice{}, fmt.Errorf("rca: LLM returned no choices")
 	}
 	if r.Limits != nil {
-		r.Limits.Reconcile(r.maxTokens(), parsed.Usage.TotalTokens)
+		r.Limits.Reconcile(reservedTokens, parsed.Usage.TotalTokens)
 		r.Limits.RecordSuccess()
 	}
 	return parsed.Choices[0], nil
@@ -531,6 +536,25 @@ type chatCompletionResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+type providerFailure struct{ err error }
+
+func (e providerFailure) Error() string { return e.err.Error() }
+func (e providerFailure) Unwrap() error { return e.err }
+
+func estimateMessageTokens(messages []chatMessage) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Role)/4 + len(message.Content)/4 + 8
+		for _, call := range message.ToolCalls {
+			total += len(call.Function.Name)/4 + len(call.Function.Arguments)/4 + 8
+		}
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
 }
 
 // --- model diagnosis JSON parsing ---

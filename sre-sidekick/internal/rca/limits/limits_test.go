@@ -39,3 +39,15 @@ func TestManagerCircuitBreaker(t *testing.T) {
 		t.Fatal("expected open circuit")
 	}
 }
+
+func TestManagerReconcilesProviderUsage(t *testing.T) {
+	m := New(Config{HourlyTokens: 100, DailyTokens: 100})
+	if err := m.Allow(context.Background(), Request{EstimatedTokens: 20}); err != nil {
+		t.Fatal(err)
+	}
+	m.Reconcile(20, 7)
+	_, hourTokens, _, _, _ := m.Snapshot()
+	if hourTokens != 7 {
+		t.Fatalf("hour tokens = %d, want 7", hourTokens)
+	}
+}

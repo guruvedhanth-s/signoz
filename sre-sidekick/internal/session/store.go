@@ -1,10 +1,10 @@
 package session
 
 import (
-	"encoding/base64"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,8 +25,7 @@ type AuditEvent struct {
 }
 type Auditor interface{ Append(AuditEvent) error }
 
-// FileAuditor is an append-only JSONL audit log. Payload is base64 encoded to
-// keep each record one line even when it contains structured JSON.
+// FileAuditor is an append-only JSONL audit log.
 type FileAuditor struct {
 	mu   sync.Mutex
 	path string
@@ -42,13 +41,14 @@ func (a *FileAuditor) Append(event AuditEvent) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if event.ID == "" {
-		event.ID = fmt.Sprintf("%d", time.Now().UnixNano())
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			return err
+		}
+		event.ID = hex.EncodeToString(id[:])
 	}
 	if event.At.IsZero() {
 		event.At = time.Now().UTC()
-	}
-	if event.Payload != "" {
-		event.Payload = base64.StdEncoding.EncodeToString([]byte(event.Payload))
 	}
 	if err := os.MkdirAll(filepath.Dir(a.path), 0o750); err != nil {
 		return err
@@ -71,6 +71,7 @@ func (a *FileAuditor) Append(event AuditEvent) error {
 type Store interface {
 	Save(View) error
 	Load(channelID, threadTS string) (View, error)
+	LoadByFingerprint(fingerprint string) (View, error)
 	Delete(channelID, threadTS string) error
 }
 
@@ -101,6 +102,16 @@ func (s *MemoryStore) Load(channelID, threadTS string) (View, error) {
 		return View{}, ErrNotFound
 	}
 	return cloneView(v), nil
+}
+func (s *MemoryStore) LoadByFingerprint(fingerprint string) (View, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, v := range s.values {
+		if v.Fingerprint == fingerprint && !v.Status.Terminal() {
+			return cloneView(v), nil
+		}
+	}
+	return View{}, ErrNotFound
 }
 func (s *MemoryStore) Delete(channelID, threadTS string) error {
 	s.mu.Lock()
@@ -146,6 +157,20 @@ func (s *FileStore) Load(channelID, threadTS string) (View, error) {
 		return View{}, ErrNotFound
 	}
 	return cloneView(v), nil
+}
+func (s *FileStore) LoadByFingerprint(fingerprint string) (View, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values, err := s.read()
+	if err != nil {
+		return View{}, err
+	}
+	for _, v := range values {
+		if v.Fingerprint == fingerprint && !v.Status.Terminal() {
+			return cloneView(v), nil
+		}
+	}
+	return View{}, ErrNotFound
 }
 func (s *FileStore) Delete(channelID, threadTS string) error {
 	s.mu.Lock()

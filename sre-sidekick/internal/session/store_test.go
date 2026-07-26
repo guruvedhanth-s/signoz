@@ -51,6 +51,45 @@ func TestManagerRehydratesFromFileStore(t *testing.T) {
 	}
 }
 
+func TestManagerPersistsTouchAndFingerprintAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	store, _ := NewFileStore(path)
+	now := time.Now().UTC()
+	first := NewManager(WithStore(store), WithClock(func() time.Time { return now }))
+	diagnosis := notify.Diagnosis{CorrelationID: "c1", Service: "svc", Environment: "prod", Window: "1h", Grounding: notify.Grounding{SLO: "slo"}}
+	created, _, err := first.Open(OpenRequest{ChannelID: "C1", ThreadTS: "T1", Diagnosis: diagnosis})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Touch(created)
+	second := NewManager(WithStore(store))
+	rehydrated, ok := second.ByFingerprint(Fingerprint("svc", "prod", "slo"))
+	if !ok || rehydrated.ThreadTS != "T1" {
+		t.Fatalf("fingerprint rehydration = %v, %+v", ok, rehydrated)
+	}
+}
+
+func TestManagerDeletesExpiredPersistentSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	store, _ := NewFileStore(path)
+	now := time.Now().UTC()
+	first := NewManager(WithStore(store), WithClosedRetention(time.Nanosecond), WithClock(func() time.Time { return now }))
+	diagnosis := notify.Diagnosis{CorrelationID: "c1", Service: "svc", Environment: "prod"}
+	created, _, err := first.Open(OpenRequest{ChannelID: "C1", ThreadTS: "T1", Diagnosis: diagnosis})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(created, ReasonClosedByUser); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	first.ReapIdle()
+	second := NewManager(WithStore(store))
+	if _, ok := second.ByThread("C1", "T1"); ok {
+		t.Fatal("expired persistent session was not deleted")
+	}
+}
+
 func TestFileAuditorIsAppendOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	auditor, err := NewFileAuditor(path)

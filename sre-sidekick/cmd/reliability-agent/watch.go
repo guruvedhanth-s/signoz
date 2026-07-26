@@ -129,15 +129,13 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 	managerOptions := []session.ManagerOption{session.WithTTL(ttl)}
 	var durableStore session.Store
 	if strings.EqualFold(fullCfg.Storage.Driver, "postgres") {
-		dsn := fullCfg.Storage.URL
-		if fullCfg.Storage.URLEnv != "" {
-			dsn = os.Getenv(fullCfg.Storage.URLEnv)
-		}
+		dsn := os.Getenv(fullCfg.Storage.URLEnv)
 		store, storeErr := session.NewPostgresStore(context.Background(), dsn)
 		if storeErr != nil {
 			return fmt.Errorf("postgres session store: %w", storeErr)
 		}
 		durableStore = store
+		defer store.Close()
 	} else if strings.EqualFold(fullCfg.Storage.Driver, "file") {
 		path := strings.TrimSpace(cfg.SessionStorePath)
 		if path == "" {
@@ -183,10 +181,11 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		return fmt.Errorf("build RCA agent: %w", err)
 	}
 	rcaAdapter := &rca.SlackAdapter{
-		Agent:         agent,
-		Metrics:       signozClient,
-		SLOConfigPath: sloConfigPath,
-		Window:        window,
+		Agent:          agent,
+		Metrics:        signozClient,
+		SLOConfigPath:  sloConfigPath,
+		Window:         window,
+		DefaultChannel: cfg.DefaultChannel,
 	}
 	actuator := &act.AdvisoryActuator{}
 
