@@ -275,9 +275,6 @@ func proposedFixBlocks(d notify.Diagnosis) []slack.Block {
 			"\nAfter: " + escape(d.MutationDiff.After) +
 			"\nExecution is disabled by default; approval is required and recorded."
 	}
-	if d.MutationDiff == nil {
-		text = "*Recommended action* (advisory - the sidekick will not run it)\n" + escape(fix)
-	}
 	if !d.Reversible {
 		// PRD section 15: irreversible actions must be labeled and demand
 		// stronger confirmation.

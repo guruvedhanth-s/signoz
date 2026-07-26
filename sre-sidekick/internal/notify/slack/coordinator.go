@@ -276,6 +276,11 @@ func (c *Coordinator) decide(
 	if !ok {
 		return
 	}
+	if kind == session.DecisionApproved && s.Diagnosis().Mutation != nil {
+		if _, ok := c.authorize(ctx, s, in, RoleOperator); !ok {
+			return
+		}
+	}
 	accepted, existing, err := c.sessions.Decide(s, session.Decision{
 		Kind:              kind,
 		UserID:            in.UserID,
@@ -369,7 +374,7 @@ func valueOrEmptyDiff(diff *mutation.Diff) mutation.Diff {
 }
 
 func actionAuditPayload(d notify.Diagnosis, result ActionResult) string {
-	payload, err := json.Marshal(map[string]any{"mutation": d.Mutation, "outcome": result.Outcome, "detail": result.Detail})
+	payload, err := json.Marshal(map[string]any{"mutation": d.Mutation, "preview": d.MutationDiff, "outcome": result.Outcome, "detail": result.Detail})
 	if err != nil {
 		return `{"outcome":"audit_encode_failed"}`
 	}

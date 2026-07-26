@@ -3,6 +3,7 @@ package act
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/mutation"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify/slack"
@@ -13,7 +14,6 @@ import (
 // explicitly enabled backend it records the request but cannot change SigNoz.
 type MutationActuator struct {
 	Backend mutation.Backend
-	Enabled bool
 }
 
 var _ slack.Actuator = (*MutationActuator)(nil)
@@ -25,7 +25,7 @@ func (a *MutationActuator) Act(ctx context.Context, req slack.ActionRequest) (sl
 	if err := req.Mutation.Validate(); err != nil {
 		return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: err.Error()}, nil
 	}
-	if !a.Enabled {
+	if !req.Execute {
 		return slack.ActionResult{Outcome: slack.OutcomeRecorded, Detail: "mutation preview recorded; execution is disabled by configuration"}, nil
 	}
 	if a.Backend == nil {
@@ -38,8 +38,15 @@ func (a *MutationActuator) Act(ctx context.Context, req slack.ActionRequest) (sl
 	if diff.Target == "" || diff.Before == "" || diff.After == "" {
 		return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: "mutation preview is incomplete"}, nil
 	}
+	if req.Preview.Target == "" || !reflect.DeepEqual(req.Preview, diff) {
+		return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: "mutation state changed since preview; refresh the preview before approving"}, nil
+	}
 	if _, err := a.Backend.Apply(ctx, *req.Mutation, diff); err != nil {
-		return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: fmt.Sprintf("mutation apply failed: %v", err)}, nil
+		rollbackErr := a.Backend.Rollback(ctx, *req.Mutation, diff)
+		if rollbackErr != nil {
+			return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: fmt.Sprintf("mutation apply failed: %v; rollback failed: %v", err, rollbackErr)}, nil
+		}
+		return slack.ActionResult{Outcome: slack.OutcomeFailed, Detail: fmt.Sprintf("mutation apply failed: %v; rollback completed", err)}, nil
 	}
 	return slack.ActionResult{Outcome: slack.OutcomeExecuted, Detail: fmt.Sprintf("mutation applied to %s; rollback is available", diff.Target)}, nil
 }
