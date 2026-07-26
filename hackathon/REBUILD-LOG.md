@@ -242,3 +242,78 @@ too few error samples to trust a pattern (0 found, 3 required)
 
 That is the product working: the service really was healthy, so there was
 nothing to diagnose, and it said so instead of inventing a root cause.
+
+## The full loop, proven live
+
+With `demo-agent --buggy` running, `diagnose` returned `status: diagnosed` in
+about six seconds: SLO unhealthy at 3.64x burn and -2.64 error budget, root
+cause "repeated timeouts in tool.search_kb after 5 seconds, causing agent.run to
+fail", ten trace evidence links.
+The numbers are computed deterministically and the prose is DeepSeek, which is
+the boundary PRD section 5 non-goal 5 requires.
+
+### Driving the alert path deterministically
+
+The demo does not have to wait for SigNoz's alertmanager to fire on its own
+schedule.
+The detect webhook is the same code path the real alert takes, so posting an
+alertmanager-shaped payload to it triggers the genuine loop instantly, which is
+what makes a recorded take repeatable:
+
+```sh
+curl -X POST http://127.0.0.1:8082/webhook \
+  -H "X-Sidekick-Webhook-Secret: $SIDEKICK_WEBHOOK_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"firing","alerts":[{"status":"firing","labels":{
+        "alertname":"SLO fast burn - grounded-answers",
+        "service":"support-agent","environment":"local",
+        "severity":"critical","slo":"grounded-answers","tier":"fast"}}]}'
+```
+
+Nothing is faked here.
+The payload is what an alertmanager notification channel sends; everything
+downstream - dedup, RCA, MCP evidence gathering, the LLM call, Block Kit
+rendering, session creation - is the production path.
+
+Start `watch` first:
+
+```sh
+go run ./cmd/reliability-agent watch \
+  --config configs/sidekick.yaml \
+  --signoz-url "$SIGNOZ_URL" --mcp-url "$SIGNOZ_MCP_URL" \
+  --signoz-internal-url "$SIGNOZ_INTERNAL_URL" \
+  --slo-config examples/support-agent-slo.yaml \
+  --webhook-listen 127.0.0.1:8082
+```
+
+### Result
+
+```
+slack socket connected
+slack message posted correlation_id=slack-support-agent-local-... kind=diagnosed
+  service=support-agent channel=C0BKT4DBNCE message_ts=... attempts=1
+incident session opened correlation_id=... thread_ts=...
+```
+
+Elapsed from webhook to posted message: about seven seconds.
+
+The rendered message contains a header, the six grounding fields, a root cause
+citing evidence IDs, evidence as SigNoz deep links capped at five of ten with a
+context note, the advisory action labelled as advisory, Approve / Decline /
+Close session buttons, and a correlation-ID footer.
+
+### Environment facts worth keeping
+
+- Slack workspace `Error404`, bot user `sre_sidekick`, channel `C0BKT4DBNCE`.
+- The bot token lacks the `channels:read` scope.
+  That does not affect posting, but `conversations.list` fails with
+  `missing_scope`, so channels cannot be enumerated with this token.
+- Evidence deep links point at `http://localhost:8080`, which resolves only on
+  the machine running the demo.
+  Fine for a recorded take; a shared environment would need `--signoz-url` set
+  to a reachable host, since that flag is what gets rewritten into the links.
+- Error budget and burn rate keep degrading while `--buggy` runs, so the numbers
+  differ between takes.
+  They read 3.64x shortly after the switch and 8.6x a few minutes later.
+  Restart the demo-agent healthy, let it settle, then switch to buggy a known
+  number of minutes before recording if a specific number is wanted on screen.
