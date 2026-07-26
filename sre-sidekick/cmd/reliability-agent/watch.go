@@ -19,11 +19,15 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/act"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/answer"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/config"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/detect"
 	sidekickslack "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/notify/slack"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/profile"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/rca"
+	profileregistry "github.com/guruvedhanth-s/signoz/sre-sidekick/internal/registry"
 	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/session"
+	"github.com/guruvedhanth-s/signoz/sre-sidekick/internal/source/signoz"
 )
 
 // DefaultConfigPath is where the sidekick looks for its configuration when no
@@ -112,6 +116,10 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 	}
 
 	api := slackapi.New(botToken, slackapi.OptionAppLevelToken(appToken))
+	auth, err := api.AuthTestContext(context.Background())
+	if err != nil {
+		return fmt.Errorf("slack auth.test: %w", err)
+	}
 	socket := socketmode.New(api)
 
 	slackClient, err := sidekickslack.New(cfg,
@@ -193,6 +201,11 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		return fmt.Errorf("build Slack authorizer: %w", err)
 	}
 
+	copilot, err := buildSlackCopilot(fullCfg, signozClient, agent)
+	if err != nil {
+		return fmt.Errorf("build Slack copilot: %w", err)
+	}
+
 	coordinator, err := sidekickslack.NewCoordinator(
 		slackClient, sessions, rcaAdapter,
 		sidekickslack.WithDefaultEnvironment(cfg.DefaultEnvironment),
@@ -201,12 +214,16 @@ func watchWithConfig(fullCfg config.Config, rcaCfg rcaConfig, sloConfigPath, win
 		sidekickslack.WithCoordinatorActuator(actuator),
 		sidekickslack.WithCoordinatorAuthorizer(authorizer),
 		sidekickslack.WithCoordinatorAuditor(auditor),
+		sidekickslack.WithCopilot(copilot),
+		sidekickslack.WithChannelServices(channelServiceScopes(cfg.ChannelServices)),
 	)
 	if err != nil {
 		return err
 	}
 
-	receiver, err := sidekickslack.NewReceiver(socket.Events, socket, coordinator)
+	receiver, err := sidekickslack.NewReceiver(socket.Events, socket, coordinator,
+		sidekickslack.WithBotUserID(auth.UserID),
+	)
 	if err != nil {
 		return err
 	}
@@ -334,4 +351,50 @@ func supervise(
 		}
 	}
 	return nil
+}
+
+func buildSlackCopilot(cfg config.Config, signozClient *signoz.Client, agent *rca.Agent) (sidekickslack.Copilot, error) {
+	profiles := profileregistry.New()
+	sloPaths := map[string]string{}
+	for _, binding := range cfg.Services {
+		if strings.TrimSpace(binding.Profile) != "" {
+			p, err := profile.LoadFile(binding.Profile)
+			if err != nil {
+				return nil, fmt.Errorf("load profile %q: %w", binding.Profile, err)
+			}
+			if err := profiles.Put(p); err != nil {
+				return nil, fmt.Errorf("register profile %q: %w", binding.Profile, err)
+			}
+		}
+		if strings.TrimSpace(binding.SLOConfig) != "" {
+			sloPaths[binding.Key()] = binding.SLOConfig
+		}
+	}
+
+	var wordsmith answer.Wordsmith
+	if agent != nil {
+		if reasoner, ok := agent.Reasoner.(*rca.LLMReasoner); ok {
+			wordsmith = answer.LLMWordsmith{Reasoner: reasoner}
+		}
+	}
+
+	registry := answer.NewRegistryFromDeps(answer.Deps{
+		Metrics:       signozClient,
+		SLOConfigs:    answer.FileSLOConfigs{Paths: sloPaths},
+		Profiles:      profiles,
+		Telemetry:     signoz.NewTelemetrySource(signozClient, 200),
+		AuditLookback: 15 * time.Minute,
+	})
+	return answer.NewSlackAdapter(registry, answer.Composer{Wordsmith: wordsmith}), nil
+}
+
+func channelServiceScopes(mapping map[string]config.ChannelScope) map[string]sidekickslack.CopilotScope {
+	if len(mapping) == 0 {
+		return nil
+	}
+	out := make(map[string]sidekickslack.CopilotScope, len(mapping))
+	for channel, scope := range mapping {
+		out[channel] = sidekickslack.CopilotScope{Service: scope.Service, Environment: scope.Environment}
+	}
+	return out
 }
